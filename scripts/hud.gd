@@ -198,7 +198,7 @@ func _build_menu() -> Control:
 	title.add_theme_font_size_override("font_size", 48)
 	v.add_child(title)
 	var sub := Label.new()
-	sub.text = "Prototype 1: capture & haul  ·  build 7"
+	sub.text = "Prototype 1: capture & haul  ·  build 8"
 	v.add_child(sub)
 	var desc := Label.new()
 	desc.autowrap_mode = TextServer.AUTOWRAP_WORD
@@ -347,6 +347,8 @@ func _process(delta: float) -> void:
 		target_lbl.text = ""
 	elif t.is_stunned():
 		target_lbl.text = "%s  $%d  STUNNED %.1fs. Hold right click to grab" % [t.spec.label, t.spec.value, t.stun_left]
+	elif t.fuse_t > 0.0:
+		target_lbl.text = "%s  UNSTABLE! Explodes in %.1fs. Left click to stun it again!" % [t.spec.label, t.fuse_t]
 	else:
 		var temper: Dictionary = Specimen.TEMPERS[t.spec.temper]
 		target_lbl.text = "%s  $%d  [%s] awake. Left click to stun\n%s" % [t.spec.label, t.spec.value, temper.name, temper.hint]

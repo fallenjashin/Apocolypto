@@ -483,6 +483,42 @@ func shove(id: int, push: Vector3) -> void:
 		p.release()
 
 
+## A volatile specimen blew up. The loot is gone and comes back later like a delivered one.
+func specimen_exploded(s: Specimen) -> void:
+	respawn_queue.append([RESPAWN_DELAY, s.species])
+	boom_fx.rpc(s.global_position)
+	var lost: int = s.spec.value
+	s.queue_free()
+	_broadcast("A %s exploded! $%d of loot lost." % [s.spec.label, lost])
+
+
+@rpc("authority", "call_local", "reliable")
+func boom_fx(pos: Vector3) -> void:
+	var ball := MeshInstance3D.new()
+	var sm := SphereMesh.new()
+	sm.radius = 1.0
+	sm.height = 2.0
+	var mat := Level.mat(Color(1.0, 0.85, 0.4, 0.8), 5.0)
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	sm.material = mat
+	ball.mesh = sm
+	add_child(ball)
+	ball.global_position = pos
+	ball.scale = Vector3.ONE * 0.5
+	var tw := ball.create_tween()
+	tw.set_parallel(true)
+	tw.tween_property(ball, "scale", Vector3.ONE * Specimen.BOOM_RADIUS, 0.35)
+	tw.tween_property(mat, "albedo_color:a", 0.0, 0.5)
+	tw.chain().tween_callback(ball.queue_free)
+	var snd := AudioStreamPlayer3D.new()
+	snd.stream = Intro._noise_sound(1.2, false)
+	snd.unit_size = 14.0
+	add_child(snd)
+	snd.global_position = pos
+	snd.finished.connect(snd.queue_free)
+	snd.play()
+
+
 ## A private message for one player (like a refused purchase).
 @rpc("authority", "call_local", "reliable")
 func notify(msg: String) -> void:
@@ -832,6 +868,44 @@ func _selftest() -> void:
 	p.head.rotation = Vector3.ZERO
 	p2.queue_free()
 	gl.queue_free()
+	await get_tree().physics_frame
+	print("Glimmer chase, explosion, and homing:")
+	p.global_position = Vector3(13.0, 0.2, 0.0)
+	var runner := specimen_spawner.spawn(["K6", "glimmer", Vector3(16.5, 0.5, 0.0)]) as Specimen
+	await get_tree().physics_frame
+	await get_tree().physics_frame
+	var heading := runner.open_heading(Vector3.RIGHT)
+	_check(heading.x < 0.5 and heading.length() > 0.99, "a fleeing specimen with a roof edge right ahead turns along it (heading x = %.2f, not 1.0)" % heading.x)
+	_check(float(Specimen.SPECIES.glimmer.speed) > Player.SPRINT * 1.2, "the Glimmer is faster than a sprint (%.0f vs %.0f)" % [Specimen.SPECIES.glimmer.speed, Player.SPRINT])
+	runner.queue_free()
+	p.global_position = Vector3(0, 0.2, 0)
+	var gb := specimen_spawner.spawn(["K4", "glimmer", Vector3(0, 1.0, 2.0)]) as Specimen
+	await get_tree().physics_frame
+	gb._server_tick(0.1)
+	_check(gb.fuse_t == 0.0, "a Glimmer that hasn't been stunned has no fuse")
+	gb.stun_left = 0.05
+	gb._server_tick(0.1)
+	_check(is_equal_approx(gb.fuse_t, Specimen.FUSE_TIME), "when its stun wears off the %.0fs fuse starts" % Specimen.FUSE_TIME)
+	gb.on_stunned(1)
+	_check(gb.fuse_t == 0.0, "stunning it again defuses it")
+	gb.stun_left = 0.05
+	gb._server_tick(0.1)
+	var queued := respawn_queue.size()
+	p.knock = Vector3.ZERO
+	gb._server_tick(Specimen.FUSE_TIME + 0.1)
+	_check(gb.is_queued_for_deletion(), "left alone, it explodes and the loot is gone")
+	_check(respawn_queue.size() == queued + 1, "a replacement Glimmer is queued")
+	_check(p.knock.length() > 1.0, "the blast throws nearby players back (knock %.1f)" % p.knock.length())
+	p.knock = Vector3.ZERO
+	var hs := specimen_spawner.spawn(["K5", "skitter", Vector3(0, Level.level_y(1) + 1.0, 3.0)]) as Specimen
+	await get_tree().physics_frame
+	hs.global_position = hs.home + Vector3(12, 0, 0)
+	_check(hs.homesick() and hs._wander_plan(0.1).x < 0.0, "a specimen far from its spawn spot walks back toward it")
+	hs.global_position = hs.home + Vector3(3, 0, 0)
+	_check(not hs.homesick(), "close to home it wanders freely")
+	hs.global_position = Vector3(12, Level.level_y(2) + 1.0, 3)
+	_check(not hs.homesick(), "on a different floor from home it just wanders (no cross-floor pathing yet)")
+	hs.queue_free()
 	await get_tree().physics_frame
 	print("Store:")
 	var sane := Shop.ORDER.size() == Shop.ITEMS.size()

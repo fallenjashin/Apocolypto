@@ -12,14 +12,14 @@ const SPECIES := {
 	"brute": {"label": "Brute", "color": Color(0.85, 0.35, 0.25), "size": 1.3, "mass": 70.0,
 		"speed": 2.5, "stun": 9.0, "struggle": 1700.0, "value": 150, "floor": 2, "temper": "territorial"},
 	"glimmer": {"label": "Glimmer", "color": Color(0.5, 0.6, 1.0), "size": 0.5, "mass": 10.0,
-		"speed": 8.0, "stun": 3.5, "struggle": 1500.0, "value": 350, "floor": 3, "temper": "shy"},
+		"speed": 10.0, "stun": 3.5, "struggle": 1500.0, "value": 350, "floor": 3, "temper": "shy", "volatile": true},
 }
 ## Each species has a temper: a rule that changes what the crew has to do.
 ## "hint" is shown on the crosshair readout so players can learn it.
 const TEMPERS := {
 	"skittish": {"name": "SKITTISH", "hint": "Lets one person walk up. Bolts from a group."},
 	"territorial": {"name": "TERRITORIAL", "hint": "Ignores you until stunned, then hunts whoever stunned it."},
-	"shy": {"name": "SHY", "hint": "Runs. Freezes only while 2+ players are looking at it."},
+	"shy": {"name": "SHY", "hint": "Faster than a sprint. Freezes only while 2+ watch. Blows up if it wakes un-stunned."},
 }
 const SKITTISH_ALONE := 4.5   # flee radius when only one player is near
 const SKITTISH_GROUP := 8.0   # flee radius (and speed-up) when two or more are near
@@ -31,6 +31,12 @@ const SLAM_PUSH := 9.0
 const SHY_RANGE := 16.0       # how far away a look still counts
 const SHY_WATCHERS := 2       # how many pairs of eyes freeze a Shy specimen
 const SHY_CONE_DEG := 30.0
+const FUSE_TIME := 3.0        # volatile specimens: seconds from waking up to exploding
+const BOOM_RADIUS := 7.0
+const BOOM_PUSH := 14.0
+const HOME_RADIUS := 6.0      # how far from its spawn spot a specimen drifts before heading home
+const FLEE_LOOK := 5.0        # how far ahead a fleeing specimen checks for walls
+const FLEE_ANGLES := [0.0, 35.0, -35.0, 70.0, -70.0, 105.0, -105.0, 140.0, -140.0]
 const NO_PLAN := Vector3(INF, 0, 0)   # "no special plan, wander instead"
 const HOLD_FORCE := 1000.0   # max pull per holder (newtons)
 const SPRING_K := 600.0
@@ -45,6 +51,8 @@ var held_by := PackedInt32Array()
 var mood := 0               # synced tell: 0 calm, 1 enraged and hunting, 2 frozen by watchers
 var provoked_by := 0        # server only: who a Territorial specimen is hunting (0 = nobody)
 var charge_t := 0.0
+var fuse_t := 0.0           # synced: >0 means about to explode (volatile species only)
+var home := Vector3.ZERO
 
 var species := "skitter"
 var spec: Dictionary
@@ -64,6 +72,7 @@ func setup(n: String, sp: String, pos: Vector3, g: Game) -> void:
 	game = g
 	position = pos
 	net_pos = pos
+	home = pos
 	mass = spec.mass
 	linear_damp = 0.6
 	lock_rotation = true
@@ -104,7 +113,7 @@ func setup(n: String, sp: String, pos: Vector3, g: Game) -> void:
 	var sync := MultiplayerSynchronizer.new()
 	sync.name = "Sync"
 	var cfg := SceneReplicationConfig.new()
-	for path in [NodePath(".:net_pos"), NodePath(".:net_yaw"), NodePath(".:stun_left"), NodePath(".:held_by"), NodePath(".:mood")]:
+	for path in [NodePath(".:net_pos"), NodePath(".:net_yaw"), NodePath(".:stun_left"), NodePath(".:held_by"), NodePath(".:mood"), NodePath(".:fuse_t")]:
 		cfg.add_property(path)
 		cfg.property_set_replication_mode(path, SceneReplicationConfig.REPLICATION_MODE_ALWAYS)
 	sync.replication_config = cfg
@@ -134,8 +143,23 @@ func is_stunned() -> bool:
 	return stun_left > 0.0
 
 
+## Volatile specimens that wake up and aren't stunned again blow up: everyone close is
+## thrown back (and drops what they carry) and the loot is gone.
+func _explode() -> void:
+	for p in _players_within(BOOM_RADIUS):
+		var away := p.global_position - global_position
+		away.y = 0.0
+		var d := away.length()
+		if d < 0.1:
+			away = Vector3(randf() - 0.5, 0, randf() - 0.5)
+		var falloff := 1.0 - clampf(d / BOOM_RADIUS, 0.0, 1.0) * 0.6
+		game.shove.rpc(p.peer_id, away.normalized() * BOOM_PUSH * falloff)
+	game.specimen_exploded(self)
+
+
 ## Called by the host when a player's prod lands.
 func on_stunned(by: int) -> void:
+	fuse_t = 0.0   # a fresh stun defuses a volatile specimen
 	if str(spec.temper) == "territorial":
 		provoked_by = by
 		charge_t = CHARGE_TIME
@@ -150,7 +174,16 @@ static func shy_frozen(watchers: int) -> bool:
 
 
 func _server_tick(delta: float) -> void:
+	var was_stunned := stun_left > 0.0
 	stun_left = maxf(0.0, stun_left - delta)
+	if bool(spec.get("volatile", false)):
+		if was_stunned and stun_left <= 0.0:
+			fuse_t = FUSE_TIME     # it just woke up: the clock starts
+		elif fuse_t > 0.0:
+			fuse_t -= delta
+			if fuse_t <= 0.0:
+				_explode()
+				return
 	var holders: Array = []
 	var kept := PackedInt32Array()
 	for id in held_by:
@@ -193,21 +226,62 @@ func _ai(delta: float) -> void:
 		"skittish": plan = _plan_skittish()
 		"territorial": plan = _plan_territorial(delta)
 		"shy": plan = _plan_shy()
-	var desired := Vector3.ZERO
-	if plan.x != INF:
-		desired = plan
-	else:
-		wander_t -= delta
-		if wander_t <= 0.0:
-			wander_t = randf_range(1.5, 3.5)
-			var a := randf() * TAU
-			wander_dir = Vector3(cos(a), 0, sin(a)) * (0.0 if randf() < 0.3 else 1.0)
-		desired = wander_dir * float(spec.speed) * 0.4
+	var desired := plan if plan.x != INF else _wander_plan(delta)
 	var v := linear_velocity
 	v.y = 0.0
 	apply_central_force(((desired - v) * mass * 4.0).limit_length(mass * 30.0))
 	if desired.length() > 0.1:
 		yaw = lerp_angle(yaw, atan2(-desired.x, -desired.z), minf(1.0, 6.0 * delta))
+
+
+## True when it has strayed from its spawn spot, on the same floor, so it can walk back.
+func homesick() -> bool:
+	if Level.floor_of(global_position.y) != Level.floor_of(home.y):
+		return false   # no pathing between floors yet
+	var flat := global_position - home
+	flat.y = 0.0
+	return flat.length() > HOME_RADIUS
+
+
+func _wander_plan(delta: float) -> Vector3:
+	if homesick():
+		var back := home - global_position
+		back.y = 0.0
+		wander_t = 0.0
+		return back.normalized() * float(spec.speed) * 0.5
+	wander_t -= delta
+	if wander_t <= 0.0:
+		wander_t = randf_range(1.5, 3.5)
+		var a := randf() * TAU
+		wander_dir = Vector3(cos(a), 0, sin(a)) * (0.0 if randf() < 0.3 else 1.0)
+	return wander_dir * float(spec.speed) * 0.4
+
+
+## Of several headings around `away`, the one with the most open space ahead
+## (with a preference for straight away), so it doesn't run into walls or off edges.
+func open_heading(away: Vector3) -> Vector3:
+	var space := get_world_3d().direct_space_state
+	var from := global_position + Vector3(0, 0.3, 0)
+	var best := away
+	var best_score := -INF
+	for deg in FLEE_ANGLES:
+		var dir := away.rotated(Vector3.UP, deg_to_rad(deg))
+		var q := PhysicsRayQueryParameters3D.create(from, from + dir * FLEE_LOOK)
+		q.exclude = [get_rid()]
+		var hit := space.intersect_ray(q)
+		var clear := FLEE_LOOK if hit.is_empty() else from.distance_to(hit.position)
+		# Also avoid running off an edge or down a hole: is there floor 1.5 m and 3 m ahead?
+		for reach in [1.5, 3.0]:
+			var ahead: Vector3 = from + dir * reach
+			var gq := PhysicsRayQueryParameters3D.create(ahead, ahead + Vector3.DOWN * 3.0)
+			gq.exclude = [get_rid()]
+			if space.intersect_ray(gq).is_empty():
+				clear = minf(clear, reach * 0.5)
+		var score := clear / FLEE_LOOK + 0.4 * cos(deg_to_rad(deg))
+		if score > best_score:
+			best_score = score
+			best = dir
+	return best
 
 
 func _players_within(radius: float) -> Array[Player]:
@@ -225,7 +299,7 @@ func _flee_plan(radius: float, speed_mult: float) -> Vector3:
 	if nearest and nearest.global_position.distance_to(global_position) < radius:
 		var away := global_position - nearest.global_position
 		away.y = 0.0
-		return away.normalized() * float(spec.speed) * speed_mult
+		return open_heading(away.normalized()) * float(spec.speed) * speed_mult
 	return NO_PLAN
 
 
@@ -280,6 +354,11 @@ func _update_visual() -> void:
 		body_mat.emission = Color(0.4, 0.7, 1.0)
 		body_mat.emission_energy_multiplier = 0.25 + 0.5 * flick
 		status = "STUNNED %.1fs" % stun_left
+	elif fuse_t > 0.0:
+		var blink := 0.5 + 0.5 * sin(Time.get_ticks_msec() * (0.01 + 0.03 / maxf(fuse_t, 0.3)))
+		body_mat.emission = Color(1.0, 0.9, 0.3)
+		body_mat.emission_energy_multiplier = 0.5 + 2.5 * blink
+		status = "UNSTABLE %.1fs - STUN IT!" % fuse_t
 	elif mood == 1:
 		var pulse := 0.5 + 0.5 * sin(Time.get_ticks_msec() * 0.015)
 		body_mat.emission = Color(1.0, 0.15, 0.1)

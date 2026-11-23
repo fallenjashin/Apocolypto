@@ -65,9 +65,12 @@ Each species has a temper that changes what the crew has to do. The crosshair re
 |---|---|---|---|
 | Skitter | Skittish | One player can walk right up (flees inside 4.5 m). Two or more nearby and it flees from 8 m, 40% faster. | Approach one at a time; the rest hang back |
 | Brute | Territorial | Never flees. Once stunned, it hunts whoever stunned it for 10 s, faster than it walks but slower than your walk, and shoves them on contact (drops what they carry). | The stunner leads it away while someone else grabs |
-| Glimmer | Shy | Runs like normal. Freezes solid only while 2+ players have it near the middle of their view (within 16 m). | Two people stare, one closes in. Needs at least 2 players |
+| Glimmer | Shy | Faster than a sprint (10 vs 8). Freezes solid only while 2+ players have it near the middle of their view (within 16 m). **Volatile:** when its stun wears off it has a 3 s fuse, and if nobody stuns it again it explodes. The loot is lost and everyone within 7 m is thrown back and drops what they carry. | Two people stare, one closes in. Keep a prod charge ready for the re-stun |
 
-Tells: a hunting Brute pulses red ("ENRAGED!") and a frozen Glimmer glows white ("FROZEN"). Looks ignore walls for now.
+Fleeing specimens look for open space ahead, so they can't be pinned against walls or run off roof edges and down holes.
+Specimens that get dropped away from their spawn spot (same floor) walk back toward it. There's no pathing between floors yet.
+
+Tells: a hunting Brute pulses red ("ENRAGED!") a frozen Glimmer glows white ("FROZEN"), and a Glimmer on its fuse blinks faster and faster ("UNSTABLE"). Looks ignore walls for now.
 Numbers are at the top of `scripts/specimen.gd`. They're a first guess. Tune them after playtests.
 
 ## The rules being tested
