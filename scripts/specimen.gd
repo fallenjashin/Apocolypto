@@ -12,14 +12,14 @@ const SPECIES := {
 	"brute": {"label": "Brute", "color": Color(0.85, 0.35, 0.25), "size": 1.3, "mass": 70.0,
 		"speed": 2.5, "stun": 9.0, "struggle": 1700.0, "value": 150, "floor": 2, "temper": "territorial"},
 	"glimmer": {"label": "Glimmer", "color": Color(0.5, 0.6, 1.0), "size": 0.5, "mass": 10.0,
-		"speed": 10.0, "stun": 3.5, "struggle": 1500.0, "value": 350, "floor": 3, "temper": "shy", "volatile": true},
+		"speed": 10.0, "stun": 3.5, "struggle": 1500.0, "value": 350, "floor": 3, "temper": "shy", "volatile": true, "blinker": true},
 }
 ## Each species has a temper: a rule that changes what the crew has to do.
 ## "hint" is shown on the crosshair readout so players can learn it.
 const TEMPERS := {
 	"skittish": {"name": "SKITTISH", "hint": "Lets one person walk up. Bolts from a group."},
 	"territorial": {"name": "TERRITORIAL", "hint": "Ignores you until stunned, then hunts whoever stunned it."},
-	"shy": {"name": "SHY", "hint": "Faster than a sprint. Freezes only while 2+ watch. Blows up if it wakes un-stunned."},
+	"shy": {"name": "SHY", "hint": "Blinks away when you close in. 2+ watchers freeze it (no blinking). Blows up if it wakes un-stunned."},
 }
 const SKITTISH_ALONE := 4.5   # flee radius when only one player is near
 const SKITTISH_GROUP := 8.0   # flee radius (and speed-up) when two or more are near
@@ -35,6 +35,10 @@ const FUSE_TIME := 3.0        # volatile specimens: seconds from waking up to ex
 const BOOM_RADIUS := 7.0
 const BOOM_PUSH := 14.0
 const HOME_RADIUS := 6.0      # how far from its spawn spot a specimen drifts before heading home
+const BLINK_TRIGGER := 7.0    # a blinker teleports when a player gets this close...
+const BLINK_TELL := 0.35      # ...after this warning flicker (a stun in time cancels it)
+const BLINK_COOLDOWN := 5.0
+const BLINK_MIN_DIST := 10.0  # it lands at least this far from every player
 const FLEE_LOOK := 5.0        # how far ahead a fleeing specimen checks for walls
 const FLEE_ANGLES := [0.0, 35.0, -35.0, 70.0, -70.0, 105.0, -105.0, 140.0, -140.0]
 const NO_PLAN := Vector3(INF, 0, 0)   # "no special plan, wander instead"
@@ -51,6 +55,8 @@ var held_by := PackedInt32Array()
 var mood := 0               # synced tell: 0 calm, 1 enraged and hunting, 2 frozen by watchers
 var provoked_by := 0        # server only: who a Territorial specimen is hunting (0 = nobody)
 var charge_t := 0.0
+var blink_t := 0.0           # server: >0 while the warning flicker plays
+var blink_cd := 0.0
 var fuse_t := 0.0           # synced: >0 means about to explode (volatile species only)
 var home := Vector3.ZERO
 
@@ -133,6 +139,8 @@ func _physics_process(delta: float) -> void:
 		net_yaw = yaw
 	else:
 		var k := minf(1.0, 18.0 * delta)
+		if global_position.distance_to(net_pos) > 5.0:
+			global_position = net_pos   # a blink: jump, don't slide across the floor
 		global_position = global_position.lerp(net_pos, k)
 		yaw = lerp_angle(yaw, net_yaw, k)
 	pivot.rotation.y = yaw
@@ -160,6 +168,7 @@ func _explode() -> void:
 ## Called by the host when a player's prod lands.
 func on_stunned(by: int) -> void:
 	fuse_t = 0.0   # a fresh stun defuses a volatile specimen
+	blink_t = 0.0  # ...and cancels a blink that was about to happen
 	if str(spec.temper) == "territorial":
 		provoked_by = by
 		charge_t = CHARGE_TIME
@@ -217,6 +226,7 @@ func _server_tick(delta: float) -> void:
 		_ai(delta)
 	if is_stunned() or held_by.size() > 0:
 		mood = 0
+		blink_t = 0.0
 
 
 func _ai(delta: float) -> void:
@@ -225,7 +235,7 @@ func _ai(delta: float) -> void:
 	match str(spec.temper):
 		"skittish": plan = _plan_skittish()
 		"territorial": plan = _plan_territorial(delta)
-		"shy": plan = _plan_shy()
+		"shy": plan = _plan_shy(delta)
 	var desired := plan if plan.x != INF else _wander_plan(delta)
 	var v := linear_velocity
 	v.y = 0.0
@@ -340,11 +350,50 @@ func watchers() -> int:
 
 
 ## Shy: runs like normal, but freezes solid while two or more players are looking at it.
-func _plan_shy() -> Vector3:
+func _plan_shy(delta := 0.0) -> Vector3:
 	if shy_frozen(watchers()):
 		mood = 2
+		blink_t = 0.0   # watched by two players: it can't blink either
 		return Vector3.ZERO
+	if bool(spec.get("blinker", false)):
+		blink_cd = maxf(0.0, blink_cd - delta)
+		if blink_t > 0.0:
+			blink_t -= delta
+			mood = 3
+			if blink_t <= 0.0:
+				blink_t = 0.0
+				blink()
+				blink_cd = BLINK_COOLDOWN
+		elif blink_cd <= 0.0 and not _players_within(BLINK_TRIGGER).is_empty():
+			blink_t = BLINK_TELL
+			mood = 3
 	return _flee_plan(FLEE_RADIUS, 1.0)
+
+
+## Where a blink lands: a spawn spot on this floor that's far from every player.
+func blink_target() -> Vector3:
+	var floor_l := Level.floor_of(global_position.y)
+	var options: Array[Vector3] = []
+	var best := global_position
+	var best_d := -1.0
+	for pt in Level.spawn_points(floor_l):
+		var nearest := INF
+		for c in game.players_root.get_children():
+			nearest = minf(nearest, (c as Node3D).global_position.distance_to(pt))
+		if nearest >= BLINK_MIN_DIST and pt.distance_to(global_position) > 6.0:
+			options.append(pt)
+		if nearest > best_d:
+			best_d = nearest
+			best = pt
+	return options.pick_random() if not options.is_empty() else best
+
+
+func blink() -> void:
+	var from := global_position
+	var to := blink_target()
+	global_position = to
+	linear_velocity = Vector3.ZERO
+	game.blink_fx.rpc(from, to)
 
 
 func _update_visual() -> void:
@@ -359,6 +408,10 @@ func _update_visual() -> void:
 		body_mat.emission = Color(1.0, 0.9, 0.3)
 		body_mat.emission_energy_multiplier = 0.5 + 2.5 * blink
 		status = "UNSTABLE %.1fs - STUN IT!" % fuse_t
+	elif mood == 3:
+		body_mat.emission = Color(0.6, 0.9, 1.0)
+		body_mat.emission_energy_multiplier = 2.5
+		status = "BLINKING!"
 	elif mood == 1:
 		var pulse := 0.5 + 0.5 * sin(Time.get_ticks_msec() * 0.015)
 		body_mat.emission = Color(1.0, 0.15, 0.1)
@@ -375,4 +428,5 @@ func _update_visual() -> void:
 			status = "STRUGGLING!"
 	if held_by.size() > 0:
 		status += "  [held x%d]" % held_by.size()
+	pivot.visible = not (mood == 3 and (Time.get_ticks_msec() / 40) % 2 == 0)   # flicker while about to blink
 	tag.text = "%s  $%d  [%s]\n%s" % [spec.label, spec.value, TEMPERS[spec.temper].name, status]

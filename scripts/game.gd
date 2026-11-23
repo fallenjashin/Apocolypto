@@ -494,22 +494,7 @@ func specimen_exploded(s: Specimen) -> void:
 
 @rpc("authority", "call_local", "reliable")
 func boom_fx(pos: Vector3) -> void:
-	var ball := MeshInstance3D.new()
-	var sm := SphereMesh.new()
-	sm.radius = 1.0
-	sm.height = 2.0
-	var mat := Level.mat(Color(1.0, 0.85, 0.4, 0.8), 5.0)
-	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	sm.material = mat
-	ball.mesh = sm
-	add_child(ball)
-	ball.global_position = pos
-	ball.scale = Vector3.ONE * 0.5
-	var tw := ball.create_tween()
-	tw.set_parallel(true)
-	tw.tween_property(ball, "scale", Vector3.ONE * Specimen.BOOM_RADIUS, 0.35)
-	tw.tween_property(mat, "albedo_color:a", 0.0, 0.5)
-	tw.chain().tween_callback(ball.queue_free)
+	_pulse_sphere(pos, Specimen.BOOM_RADIUS, Color(1.0, 0.85, 0.4, 0.8), 0.5)
 	var snd := AudioStreamPlayer3D.new()
 	snd.stream = Intro._noise_sound(1.2, false)
 	snd.unit_size = 14.0
@@ -517,6 +502,32 @@ func boom_fx(pos: Vector3) -> void:
 	snd.global_position = pos
 	snd.finished.connect(snd.queue_free)
 	snd.play()
+
+
+## A Glimmer teleported: a pale flash at both ends.
+@rpc("authority", "call_local", "reliable")
+func blink_fx(from: Vector3, to: Vector3) -> void:
+	_pulse_sphere(from, 1.6, Color(0.6, 0.9, 1.0, 0.8), 0.35)
+	_pulse_sphere(to, 1.6, Color(0.6, 0.9, 1.0, 0.8), 0.35)
+
+
+func _pulse_sphere(pos: Vector3, radius: float, color: Color, secs: float) -> void:
+	var ball := MeshInstance3D.new()
+	var sm := SphereMesh.new()
+	sm.radius = 1.0
+	sm.height = 2.0
+	var mat := Level.mat(color, 5.0)
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	sm.material = mat
+	ball.mesh = sm
+	add_child(ball)
+	ball.global_position = pos
+	ball.scale = Vector3.ONE * 0.3
+	var tw := ball.create_tween()
+	tw.set_parallel(true)
+	tw.tween_property(ball, "scale", Vector3.ONE * radius, secs * 0.7)
+	tw.tween_property(mat, "albedo_color:a", 0.0, secs)
+	tw.chain().tween_callback(ball.queue_free)
 
 
 ## A private message for one player (like a refused purchase).
@@ -855,7 +866,7 @@ func _selftest() -> void:
 	var gl := specimen_spawner.spawn(["K3", "glimmer", Vector3(0, 1.8, -6.0)]) as Specimen
 	await get_tree().physics_frame
 	_check(gl.watchers() == 1, "Shy: a player looking straight at it counts as one watcher")
-	_check(gl._plan_shy().x != INF and gl._plan_shy().length() > 1.0 and gl.mood == 0, "Shy: with one watcher it still runs away")
+	_check(gl._plan_shy().x != INF and gl._plan_shy().length() > 1.0 and gl.mood != 2, "Shy: with one watcher it still runs away (not frozen)")
 	p2 = player_spawner.spawn([2]) as Player
 	p2.global_position = Vector3(1, 0.2, 0)
 	p2.rotation = Vector3.ZERO
@@ -906,6 +917,40 @@ func _selftest() -> void:
 	hs.global_position = Vector3(12, Level.level_y(2) + 1.0, 3)
 	_check(not hs.homesick(), "on a different floor from home it just wanders (no cross-floor pathing yet)")
 	hs.queue_free()
+	await get_tree().physics_frame
+	print("Glimmer blink:")
+	var spot: Vector3 = Level.spawn_points(3)[0]
+	p.global_position = spot + Vector3(3, -0.8, 0)
+	var bl := specimen_spawner.spawn(["K7", "glimmer", spot]) as Specimen
+	await get_tree().physics_frame
+	bl._plan_shy(0.05)
+	_check(bl.blink_t > 0.0 and bl.mood == 3, "a player closing in starts a blink warning (flicker)")
+	bl.on_stunned(1)
+	_check(bl.blink_t == 0.0, "a stun during the warning cancels the blink")
+	bl._plan_shy(0.05)
+	var before := bl.global_position
+	bl._plan_shy(Specimen.BLINK_TELL + 0.1)
+	var jumped := bl.global_position.distance_to(before)
+	var from_player := bl.global_position.distance_to(p.global_position)
+	_check(jumped > 6.0 and from_player >= Specimen.BLINK_MIN_DIST, "it teleports away (%.0f m), landing %.0f m from the player" % [jumped, from_player])
+	_check(bl.blink_cd > 0.0, "it has a cooldown before it can blink again")
+	bl.global_position = before
+	bl._plan_shy(0.1)
+	_check(bl.blink_t == 0.0, "during the cooldown it only runs; no new warning")
+	bl.blink_cd = 0.0
+	p.global_position = Vector3(spot.x, spot.y - 0.8, spot.z + 6.0)
+	bl.global_position = Vector3(spot.x, spot.y + 0.8, spot.z)
+	p.rotation = Vector3.ZERO
+	p.head.rotation = Vector3.ZERO
+	p2 = player_spawner.spawn([2]) as Player
+	p2.global_position = p.global_position + Vector3(0.8, 0, 0)
+	p2.rotation = Vector3.ZERO
+	p2.head.rotation = Vector3.ZERO
+	await get_tree().physics_frame
+	bl._plan_shy(0.1)
+	_check(bl.mood == 2 and bl.blink_t == 0.0, "two watchers freeze it: no warning and no blink even with players close")
+	p2.queue_free()
+	bl.queue_free()
 	await get_tree().physics_frame
 	print("Store:")
 	var sane := Shop.ORDER.size() == Shop.ITEMS.size()
