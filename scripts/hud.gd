@@ -74,7 +74,7 @@ func _ready() -> void:
 	help.anchor_bottom = 1.0
 	help.offset_left = -330
 	help.offset_top = -120
-	help.text = "WASD move  ·  Shift sprint  ·  Space jump\nLeft click: stun prod\nHold E: grab / carry\nB (on the roof): military store\nEsc: free the mouse"
+	help.text = "WASD move  ·  Shift sprint  ·  Space jump\nLeft click: stun prod\nHold right click: grab / carry\nB (on the roof): military store\nEsc: free the mouse"
 	help.offset_top = -140
 	_build_shop()
 
@@ -346,6 +346,6 @@ func _process(delta: float) -> void:
 	if t == null:
 		target_lbl.text = ""
 	elif t.is_stunned():
-		target_lbl.text = "%s  $%d  STUNNED %.1fs. Hold E to grab" % [t.spec.label, t.spec.value, t.stun_left]
+		target_lbl.text = "%s  $%d  STUNNED %.1fs. Hold right click to grab" % [t.spec.label, t.spec.value, t.stun_left]
 	else:
 		target_lbl.text = "%s  $%d  awake. Left click to stun" % [t.spec.label, t.spec.value]

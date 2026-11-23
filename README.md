@@ -20,7 +20,7 @@ Everything is gray boxes on purpose. Don't add art until that answer is yes.
 |---|---|
 | WASD / Shift / Space | Move / sprint / jump |
 | Left click | Stun prod (6 charges, more with Prod Batteries; they recharge on the roof) |
-| Hold E | Grab and carry |
+| Hold right click | Grab and carry |
 | Esc | Free the mouse (click to recapture) |
 | B | Open the military store (on the roof only) |
 | R | Host only: start a new run after winning or losing |

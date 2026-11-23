@@ -90,7 +90,7 @@ func _make_spawner(n: String, path: String, fn: Callable) -> MultiplayerSpawner:
 
 func _setup_input() -> void:
 	var keys := {"fwd": KEY_W, "back": KEY_S, "left": KEY_A, "right": KEY_D,
-		"jump": KEY_SPACE, "sprint": KEY_SHIFT, "grab": KEY_E, "menu": KEY_ESCAPE, "restart": KEY_R,
+		"jump": KEY_SPACE, "sprint": KEY_SHIFT, "menu": KEY_ESCAPE, "restart": KEY_R,
 		"shop": KEY_B}
 	for action in keys:
 		if not InputMap.has_action(action):
@@ -103,6 +103,11 @@ func _setup_input() -> void:
 		var mb := InputEventMouseButton.new()
 		mb.button_index = MOUSE_BUTTON_LEFT
 		InputMap.action_add_event("prod", mb)
+	if not InputMap.has_action("grab"):
+		InputMap.add_action("grab")
+		var rb := InputEventMouseButton.new()
+		rb.button_index = MOUSE_BUTTON_RIGHT
+		InputMap.action_add_event("grab", rb)
 
 
 # --- Networking --------------------------------------------------------------
