@@ -14,7 +14,7 @@ const RESPAWN_DELAY := 20.0
 # Surplus earnings stay in the bank (to be spent in the store); the quota resets every day.
 const DAYS := 4
 const QUOTAS := [300, 500, 750, 1000]
-const DAY_SECONDS := 300.0
+const DAY_SECONDS := 480.0   # one day, dawn (6 AM) to midnight, in real seconds
 const BRIEFING_SECONDS := 6.0
 const FIRST_BRIEFING_SECONDS := 16.0   # day 1 waits for the opening cinematic
 const SUMMARY_SECONDS := 12.0
@@ -776,7 +776,42 @@ func _unhandled_input(event: InputEvent) -> void:
 
 # --- Server loop: clock, deliveries and respawns -----------------------------
 
+## How far through the day we are: 0 at dawn, 1 at midnight.
+func day_progress() -> float:
+	if not in_game:
+		return 0.0
+	return clampf(1.0 - time_left / DAY_SECONDS, 0.0, 1.0)
+
+
+## 6:00 AM at progress 0 up to 12:00 AM at progress 1.
+static func clock_text(progress: float) -> String:
+	var minutes := roundi((6.0 + 18.0 * clampf(progress, 0.0, 1.0)) * 60.0)
+	var h24 := (minutes / 60) % 24
+	var h12 := h24 % 12
+	if h12 == 0:
+		h12 = 12
+	return "%d:%02d %s" % [h12, minutes % 60, "AM" if h24 < 12 else "PM"]
+
+
+## The sky and the floor lights follow the clock: the day gets darker and scarier.
+func _update_light() -> void:
+	var t := day_progress()
+	Level.apply_time(t)
+	if floor_info.has("lights"):
+		var energy := Floors.light_energy(t)
+		var col := Floors.light_color(active_floor, t)
+		var late := smoothstep(0.7, 1.0, t)
+		var now := Time.get_ticks_msec()
+		var i := 0
+		for l in floor_info.lights:
+			var n := sin(now * 0.017 + i * 5.1) * sin(now * 0.0071 + i * 1.3)
+			(l as OmniLight3D).light_energy = energy * (1.0 - 0.75 * late * smoothstep(0.5, 0.9, n))
+			(l as OmniLight3D).light_color = col
+			i += 1
+
+
 func _process(delta: float) -> void:
+	_update_light()
 	if multiplayer.multiplayer_peer == null or multiplayer.is_server():
 		return
 	# Clients keep their own copy of the clock ticking between the server's corrections.
@@ -1257,6 +1292,29 @@ func _selftest() -> void:
 	p2.queue_free()
 	bl.queue_free()
 	await get_tree().physics_frame
+	print("Day clock:")
+	_check(clock_text(0.0) == "6:00 AM" and clock_text(0.5) == "3:00 PM" and clock_text(1.0) == "12:00 AM",
+		"the clock runs from %s to %s" % [clock_text(0.0), clock_text(1.0)])
+	_check(clock_text(0.25) == "10:30 AM" and clock_text(0.75) == "7:30 PM", "and passes through %s and %s" % [clock_text(0.25), clock_text(0.75)])
+	new_run(0.1)
+	tick_run(0.2)
+	time_left = DAY_SECONDS
+	var at_dawn := day_progress()
+	time_left = DAY_SECONDS / 2.0
+	var at_mid := day_progress()
+	time_left = 0.0
+	_check(at_dawn == 0.0 and is_equal_approx(at_mid, 0.5) and day_progress() == 1.0, "the day starts at dawn and ends at midnight (progress %.1f, %.1f, %.1f)" % [at_dawn, at_mid, day_progress()])
+	Level.apply_time(0.0)
+	var dawn_sun: float = Level._sun.light_energy
+	var dawn_ambient: float = Level._env.ambient_light_energy
+	Level.apply_time(1.0)
+	_check(Level._sun.light_energy < dawn_sun * 0.2 and Level._env.ambient_light_energy < dawn_ambient * 0.5,
+		"by midnight the sun is nearly out (%.2f -> %.2f) and ambient light is down (%.2f -> %.2f)" % [
+			dawn_sun, Level._sun.light_energy, dawn_ambient, Level._env.ambient_light_energy])
+	Level.apply_time(0.0)
+	_check(Floors.light_energy(1.0) < Floors.light_energy(0.0) * 0.4, "the floor lights dim as the day goes on (%.1f -> %.1f)" % [Floors.light_energy(0.0), Floors.light_energy(1.0)])
+	_check(Floors.light_color(2, 1.0).g < Floors.light_color(2, 0.0).g, "and turn redder")
+	_check(Floors.cell_name(Vector2i(0, 0)) == "A1" and Floors.cell_name(Vector2i(3, 4)) == "D5", "maze cells have grid names the crew can call out (A1 is the elevator)")
 	print("Store:")
 	var sane := Shop.ORDER.size() == Shop.ITEMS.size()
 	for id in Shop.ORDER:
@@ -1455,5 +1513,15 @@ func _shot() -> void:
 		await _wait(0.6)
 		get_viewport().get_texture().get_image().save_png("%s/shot%d.png" % [dir, i])
 		i += 1
-	p.global_position = Vector3(cell.x, Floors.EXP_Y + 6.0, cell.z)
+	time_left = 40.0   # late evening
+	p.global_position = Vector3(Floors.CELL * 1.5, Floors.EXP_Y + 0.05, Floors.CELL * 0.5)
+	p.rotation.y = -PI / 2
+	p.head.rotation.x = -0.05
+	await _wait(0.8)
+	get_viewport().get_texture().get_image().save_png("%s/shot%d.png" % [dir, i])   # the maze near midnight
+	i += 1
+	p.global_position = Vector3(2, 0.05, -4)
+	p.rotation.y = -PI / 2
+	await _wait(0.8)
+	get_viewport().get_texture().get_image().save_png("%s/shot%d.png" % [dir, i])   # the roof near midnight
 	get_tree().quit(0)

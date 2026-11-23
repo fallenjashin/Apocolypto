@@ -28,7 +28,8 @@ Everything is gray boxes on purpose. Don't add art until that answer is yes.
 
 ## The run
 
-A run is **4 days**. Each day has a **5-minute clock** and a **quota** you must earn before it hits zero.
+A run is **4 days**. Each day is **8 real minutes**, shown as game time from **6:00 AM (dawn) to midnight**, and has a **quota** you must earn before it ends.
+The sky dims through the afternoon and the floor lights get dimmer, redder and flickery as midnight approaches.
 
 | Day | 1 | 2 | 3 | 4 |
 |---|---|---|---|---|

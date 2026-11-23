@@ -18,6 +18,10 @@ const ROOF_CAB_FRONT := Vector3(12.0, 0.0, -4.0)
 
 static var _mats := {}
 static var roof_cab := {}   # the roof elevator: {door, zone_c, zone_h, panel}
+static var _env: Environment
+static var _sun: DirectionalLight3D
+static var _sky: ProceduralSkyMaterial
+static var _last_time := -1.0
 
 
 static func level_y(l: int) -> float:
@@ -200,6 +204,31 @@ static func _environment(world: Node3D) -> void:
 	sun.rotation_degrees = Vector3(-25, 140, 0)
 	sun.shadow_enabled = true
 	world.add_child(sun)
+	_env = env
+	_sun = sun
+	_sky = psm
+	_last_time = -1.0
+
+
+## Sets the sky, sun and fog for how far through the day it is (0 = dawn, 1 = midnight).
+## Dawn is a fiery orange, midday is paler, and the last third of the day sinks into dark.
+static func apply_time(progress: float) -> void:
+	if _env == null or absf(progress - _last_time) < 0.002:
+		return
+	_last_time = progress
+	var t := clampf(progress, 0.0, 1.0)
+	var day := 1.0 - smoothstep(0.30, 0.95, t)   # 1 in the morning and early afternoon, 0 at midnight
+	var noon := sin(clampf(t / 0.6, 0.0, 1.0) * PI)   # 0 at dawn, 1 around 3 PM, 0 again by evening
+	var warm := Color(0.75, 0.35, 0.18)
+	_sky.sky_top_color = Color(0.07, 0.05, 0.12).lerp(Color(0.2, 0.28, 0.5), noon).lerp(Color(0.005, 0.005, 0.02), 1.0 - day)
+	_sky.sky_horizon_color = warm.lerp(Color(0.8, 0.6, 0.45), noon).lerp(Color(0.12, 0.04, 0.05), 1.0 - day)
+	_sky.ground_horizon_color = Color(0.4, 0.18, 0.1).lerp(Color(0.03, 0.01, 0.01), 1.0 - day)
+	_sun.light_energy = lerpf(0.04, 0.7 + 0.35 * noon, day)
+	_sun.light_color = Color(1, 0.6, 0.4).lerp(Color(1, 0.9, 0.8), noon).lerp(Color(0.5, 0.55, 1.0), 1.0 - day)
+	_sun.rotation_degrees = Vector3(lerpf(-12.0, -45.0, noon) - 8.0 * (1.0 - day), 140, 0)
+	_env.ambient_light_energy = lerpf(0.04, 0.18 + 0.12 * noon, day)
+	_env.fog_light_color = Color(0.45, 0.25, 0.18).lerp(Color(0.03, 0.02, 0.04), 1.0 - day)
+	_env.fog_density = lerpf(0.006, 0.0025, day)
 
 
 ## The burning city and the asteroid crater, visible from the roof.

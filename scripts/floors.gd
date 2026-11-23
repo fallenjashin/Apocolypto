@@ -184,6 +184,22 @@ static func reachable_cells(m: Dictionary) -> int:
 
 # --- Geometry ----------------------------------------------------------------
 
+## How bright and what colour the ceiling lights are, for floor `f` at `progress` through
+## the day. They dim and redden as midnight approaches.
+static func light_energy(progress: float) -> float:
+	return 2.6 * lerpf(1.0, 0.3, smoothstep(0.3, 1.0, progress))
+
+
+static func light_color(f: int, progress: float) -> Color:
+	var col := Color(1.0, 0.85, 0.7).lerp(Color(1.0, 0.3, 0.25), float(f) / float(LIST.size() - 1))
+	return col.lerp(Color(0.9, 0.1, 0.1), 0.5 * smoothstep(0.5, 1.0, progress))
+
+
+## "A1" is the cell by the elevator. Columns are letters, rows are numbers.
+static func cell_name(c: Vector2i) -> String:
+	return "%s%d" % [char(65 + c.x), c.y + 1]
+
+
 ## Builds an elevator cab. `front` is the middle of its door; the cab extends west from it.
 ## Returns the door node, the zone that counts as "inside", and where the panel is.
 static func build_cab(root: Node3D, front: Vector3, color: Color) -> Dictionary:
@@ -276,19 +292,20 @@ static func build(parent: Node3D, f: int, seed_v: int) -> Dictionary:
 	var cab := build_cab(root, CAB_FRONT, wc)
 	# Dim, flickery-looking lights get redder the deeper you go.
 	var lights: Array[OmniLight3D] = []
-	var col := Color(1.0, 0.85, 0.7).lerp(Color(1.0, 0.3, 0.25), float(f) / float(LIST.size() - 1))
+	var col := light_color(f, 0.0)
 	var cells: Array[Vector3] = []
 	for y in h:
 		for x in w:
 			var c := Vector2i(x, y)
 			if c.distance_to(Vector2(0, 0)) >= 3.0:
 				cells.append(cell_center(c, EXP_Y + 1.0))
+			Level.label(root, cell_name(c), cell_center(c, EXP_Y + 2.9), 36, Color(0.8, 0.8, 0.85, 0.7))
 			if x % 2 == 0 and y % 2 == 0:
 				var o := OmniLight3D.new()
 				o.position = cell_center(c, EXP_Y + WALL_H - 0.5)
 				o.light_color = col
-				o.light_energy = 2.2
-				o.omni_range = 11
+				o.light_energy = light_energy(0.0)
+				o.omni_range = 13
 				root.add_child(o)
 				lights.append(o)
 	Level.label(root, "FLOOR %d" % int(d.number), Vector3(CELL * 0.5, EXP_Y + 2.6, 0.3), 72, col)

@@ -296,7 +296,7 @@ func _build_menu() -> Control:
 	title.add_theme_font_size_override("font_size", 48)
 	v.add_child(title)
 	var sub := Label.new()
-	sub.text = "Prototype 1: capture & haul  ·  build 9"
+	sub.text = "Prototype 1: capture & haul  ·  build 10"
 	v.add_child(sub)
 	var desc := Label.new()
 	desc.autowrap_mode = TextServer.AUTOWRAP_WORD
@@ -378,7 +378,7 @@ func _top_text() -> String:
 	var clock := ""
 	match g.phase:
 		Game.Phase.BRIEFING: clock = "starts in %d" % ceili(g.phase_t)
-		Game.Phase.PLAYING: clock = Game.fmt_clock(g.time_left)
+		Game.Phase.PLAYING: clock = "%s  (%s left)" % [Game.clock_text(g.day_progress()), Game.fmt_clock(g.time_left)]
 		Game.Phase.SUMMARY: clock = "day over"
 		_: clock = "run over"
 	var met := "   QUOTA MET" if g.earned_today >= g.quota() else ""
