@@ -279,6 +279,7 @@ func request_stun(spec_name: String) -> void:
 	if s == null or p == null or p.global_position.distance_to(s.global_position) > 5.0:
 		return
 	s.stun_left = float(s.spec.stun) * Shop.stun_mult(upgrades)
+	s.on_stunned(p.peer_id)
 
 
 @rpc("any_peer", "call_local", "reliable")
@@ -470,6 +471,16 @@ func request_buy(id: String) -> void:
 	else:
 		upgrades[id] = lvl + 1
 	_broadcast("%s bought %s%s." % [p.tag.text, Shop.ITEMS[id].title, "" if id == "daylight" else " (level %d)" % (lvl + 1)])
+
+
+## A specimen shoved a player (Territorial slam). Only that player's own machine applies it.
+@rpc("authority", "call_local", "reliable")
+func shove(id: int, push: Vector3) -> void:
+	var p := local_player()
+	if p and p.peer_id == id:
+		p.knock = Vector3(push.x, 0, push.z)
+		p.velocity.y = 4.0
+		p.release()
 
 
 ## A private message for one player (like a refused purchase).
@@ -769,6 +780,59 @@ func _selftest() -> void:
 	_check(phase == Phase.WON, "meeting the final quota wins the run")
 	net_clock(5.0, 77.0)
 	_check(phase_t == 5.0 and time_left == 77.0, "clock corrections from the host are applied")
+	print("Specimen tempers:")
+	new_run(0.1)
+	tick_run(0.2)
+	p.global_position = Vector3(0, 0.2, 0)
+	p.rotation = Vector3.ZERO
+	p.head.rotation = Vector3.ZERO
+	_check(Specimen.skittish_radius(1) < Specimen.skittish_radius(2), "Skittish: a lone player can get closer than a group can")
+	_check(not Specimen.shy_frozen(1) and Specimen.shy_frozen(2), "Shy: one watcher isn't enough, two freeze it")
+	var skit := specimen_spawner.spawn(["K1", "skitter", Vector3(0, 0.5, 3.0)]) as Specimen
+	await get_tree().physics_frame
+	_check(skit._plan_skittish().x != INF and skit._plan_skittish().z > 0.0, "Skittish: one player at 3m still makes it run (directly away)")
+	skit.global_position = Vector3(0, 0.5, 6.5)
+	_check(skit._plan_skittish().x == INF, "Skittish: one player at 6.5m does not scare it (you can walk up alone)")
+	var p2 := player_spawner.spawn([2]) as Player
+	p2.global_position = Vector3(2, 0.2, 0)
+	await get_tree().physics_frame
+	_check(skit._plan_skittish().x != INF, "Skittish: with two players at 6.5m it bolts")
+	p2.queue_free()
+	await get_tree().physics_frame
+	skit.queue_free()
+	var bru := specimen_spawner.spawn(["K2", "brute", Vector3(0, 0.7, 2.0)]) as Specimen
+	await get_tree().physics_frame
+	_check(bru._plan_territorial(0.1).x == INF and bru.provoked_by == 0, "Territorial: ignores a player standing right next to it")
+	request_stun.rpc_id(1, "K2")
+	_check(bru.provoked_by == 1, "Territorial: the player who stunned it becomes its target")
+	bru.stun_left = 0.0
+	bru.global_position = Vector3(0, 0.7, 8.0)
+	var charge := bru._plan_territorial(0.1)
+	_check(charge.z < 0.0 and bru.mood == 1, "Territorial: once awake it charges at the stunner (enraged)")
+	_check(charge.length() > float(Specimen.SPECIES.brute.speed), "Territorial: it charges faster than it normally walks")
+	_check(charge.length() < Player.WALK, "Territorial: but a walking player can still outrun a charge (%.1f vs %.1f)" % [charge.length(), Player.WALK])
+	bru.global_position = Vector3(0, 0.7, 1.0)
+	bru._plan_territorial(0.1)
+	_check(p.knock.length() > 1.0 and bru.provoked_by == 0, "Territorial: it slams the stunner on contact, then calms down")
+	p.knock = Vector3.ZERO
+	bru.queue_free()
+	var gl := specimen_spawner.spawn(["K3", "glimmer", Vector3(0, 1.8, -6.0)]) as Specimen
+	await get_tree().physics_frame
+	_check(gl.watchers() == 1, "Shy: a player looking straight at it counts as one watcher")
+	_check(gl._plan_shy().x != INF and gl._plan_shy().length() > 1.0 and gl.mood == 0, "Shy: with one watcher it still runs away")
+	p2 = player_spawner.spawn([2]) as Player
+	p2.global_position = Vector3(1, 0.2, 0)
+	p2.rotation = Vector3.ZERO
+	p2.head.rotation = Vector3.ZERO
+	await get_tree().physics_frame
+	_check(gl.watchers() == 2, "Shy: two players looking at it are two watchers")
+	_check(gl._plan_shy() == Vector3.ZERO and gl.mood == 2, "Shy: two watchers freeze it solid")
+	p.head.rotation.y = PI
+	_check(gl.watchers() == 1 and gl._plan_shy().length() > 1.0, "Shy: one watcher looks away and it runs again")
+	p.head.rotation = Vector3.ZERO
+	p2.queue_free()
+	gl.queue_free()
+	await get_tree().physics_frame
 	print("Store:")
 	var sane := Shop.ORDER.size() == Shop.ITEMS.size()
 	for id in Shop.ORDER:

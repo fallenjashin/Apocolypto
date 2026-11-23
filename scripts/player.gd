@@ -27,6 +27,7 @@ var charges := MAX_CHARGES
 var prod_cd := 0.0
 var recharge_t := 0.0
 var grabbing := ""
+var knock := Vector3.ZERO   # a shove from a specimen; fades out quickly
 
 
 func setup(id: int, g: Game) -> void:
@@ -114,6 +115,10 @@ func max_charges() -> int:
 	return Shop.max_charges(game.upgrades)
 
 
+func look_dir() -> Vector3:
+	return -cam.global_basis.z
+
+
 func get_hold_point() -> Vector3:
 	return head.global_position - head.global_basis.z * 2.0
 
@@ -159,6 +164,9 @@ func _physics_process(delta: float) -> void:
 	var k := minf(1.0, ACCEL * delta)
 	velocity.x = lerpf(velocity.x, dir.x * speed, k)
 	velocity.z = lerpf(velocity.z, dir.z * speed, k)
+	velocity.x += knock.x
+	velocity.z += knock.z
+	knock = knock.move_toward(Vector3.ZERO, 18.0 * delta)
 	move_and_slide()
 
 	prod_cd = maxf(0.0, prod_cd - delta)

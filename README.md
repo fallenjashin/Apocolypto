@@ -57,6 +57,19 @@ Upgrades are crew-wide and last the whole run. The host validates every purchase
 
 Prices and strengths live in `scripts/shop.gd`. They're a first guess. Tune them after playtests.
 
+## Specimen tempers
+
+Each species has a temper that changes what the crew has to do. The crosshair readout names it and shows a one-line hint.
+
+| Species | Temper | Rule | Team tactic |
+|---|---|---|---|
+| Skitter | Skittish | One player can walk right up (flees inside 4.5 m). Two or more nearby and it flees from 8 m, 40% faster. | Approach one at a time; the rest hang back |
+| Brute | Territorial | Never flees. Once stunned, it hunts whoever stunned it for 10 s, faster than it walks but slower than your walk, and shoves them on contact (drops what they carry). | The stunner leads it away while someone else grabs |
+| Glimmer | Shy | Runs like normal. Freezes solid only while 2+ players have it near the middle of their view (within 16 m). | Two people stare, one closes in. Needs at least 2 players |
+
+Tells: a hunting Brute pulses red ("ENRAGED!") and a frozen Glimmer glows white ("FROZEN"). Looks ignore walls for now.
+Numbers are at the top of `scripts/specimen.gd`. They're a first guess. Tune them after playtests.
+
 ## The rules being tested
 
 - **Prod:** a stun lasts 6s for a Skitter, 9s for a Brute, and 3.5s for a Glimmer.
