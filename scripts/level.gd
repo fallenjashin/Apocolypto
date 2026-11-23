@@ -1,8 +1,8 @@
 class_name Level
 extends RefCounted
-## Builds the gray-box building in code so every peer gets identical geometry
-## without syncing anything. Level 0 is the roof (the camp); levels 1-3 go down.
-## Ramps alternate sides, so every floor makes you cross the building.
+## Builds the roof (the camp), the building's outer shell and the city, in code so
+## every peer gets identical geometry without syncing anything. The expedition
+## floors you reach by elevator are built by Floors.
 
 const HALF := 15.0          # building is 30 x 30 m
 const ROOF_HALF := 18.0     # the roof deck overhangs the walls: 36 x 36 m of camp
@@ -10,44 +10,38 @@ const GROUND_Y := -18.6     # street level
 const FLOOR_H := 6.0        # floor-to-floor height
 const SLAB := 0.5
 const DEEPEST := 3
-const RAMP_HALF_LEN := 7.0  # ramp holes span z = -7..7
 const PEN_MIN := Vector3(6.0, -0.5, 6.0)
 const PEN_MAX := Vector3(13.0, 5.0, 13.0)
 const CRATER_POS := Vector3(95, -14, -70)
+## The elevator on the roof: door middle (the cab extends west from here).
+const ROOF_CAB_FRONT := Vector3(12.0, 0.0, -4.0)
 
 static var _mats := {}
+static var roof_cab := {}   # the roof elevator: {door, zone_c, zone_h, panel}
 
 
 static func level_y(l: int) -> float:
 	return -FLOOR_H * l
 
 
-## X centre of the hole in slab `l` (the ramp from level l down to l+1).
-static func hole_x(l: int) -> float:
-	return -13.0 if l % 2 == 0 else 13.0
-
-
-## Odd floors use the layout as written, even floors are mirrored in X.
-static func mirror(l: int) -> float:
-	return 1.0 if l % 2 == 1 else -1.0
-
-
+## 0 on the roof (camp), 1 anywhere else (down on an expedition floor).
 static func floor_of(y: float) -> int:
-	return clampi(ceili(-y / FLOOR_H - 0.01), 0, DEEPEST)
+	return 0 if y > -3.0 else 1
+
+
+## Height of the walkable surface under something at height y.
+static func ground_y(y: float) -> float:
+	return 0.0 if y > -3.0 else Floors.EXP_Y
+
+
+## True when something has fallen out of the world (off the roof, or through a floor).
+static func fell_out(y: float) -> bool:
+	return (y < -28.0 and y > -90.0) or y < Floors.EXP_Y - 12.0
 
 
 static func in_pen(p: Vector3) -> bool:
 	return p.x > PEN_MIN.x and p.x < PEN_MAX.x and p.z > PEN_MIN.z and p.z < PEN_MAX.z \
 		and p.y > PEN_MIN.y and p.y < PEN_MAX.y
-
-
-static func spawn_points(l: int) -> Array:
-	var m := mirror(l)
-	var out := []
-	for p in [Vector2(-5, -3), Vector2(5, 3), Vector2(-6, 12.5), Vector2(6, -12.5),
-			Vector2(-5, 4), Vector2(5, -4), Vector2(-7, -12), Vector2(7, 12)]:
-		out.append(Vector3(p.x * m, level_y(l) + 1.0, p.y))
-	return out
 
 
 static func mat(c: Color, emit := 0.0) -> StandardMaterial3D:
@@ -112,42 +106,31 @@ static func build(root: Node3D) -> void:
 	_environment(world)
 	var floor_c := Color(0.32, 0.32, 0.34)
 	var wall_c := Color(0.5, 0.48, 0.45)
-	for l in range(0, DEEPEST + 1):
-		var y := level_y(l)
-		var fc := floor_c.darkened(0.12 * l)
-		if l < DEEPEST:
-			var hx := hole_x(l)
-			var s := signf(hx)
-			box(world, Vector3(-s * 2.0, y - SLAB / 2, 0), Vector3(26, SLAB, 30), fc)
-			box(world, Vector3(hx, y - SLAB / 2, -11), Vector3(4, SLAB, 8), fc)
-			box(world, Vector3(hx, y - SLAB / 2, 11), Vector3(4, SLAB, 8), fc)
-			_ramp(world, hx, y, fc.lightened(0.15))
-			# Railings: inner edge of the hole and its far end. Enter from the z = -7 end.
-			var rail := Color(0.75, 0.6, 0.2)
-			box(world, Vector3(hx - s * 2.0, y + 0.5, 0), Vector3(0.15, 1.0, 14), rail)
-			box(world, Vector3(hx, y + 0.5, 7), Vector3(4, 1.0, 0.15), rail)
-		else:
-			box(world, Vector3(0, y - SLAB / 2, 0), Vector3(30, SLAB, 30), fc)
-		if l == 0:
-			var extra := ROOF_HALF - HALF
-			for sz in [-1.0, 1.0]:
-				box(world, Vector3(0, -SLAB / 2, sz * (HALF + extra / 2)), Vector3(ROOF_HALF * 2, SLAB, extra), fc)
-				box(world, Vector3(sz * (HALF + extra / 2), -SLAB / 2, 0), Vector3(extra, SLAB, HALF * 2), fc)
-			_roof(world)
-		else:
-			_interior(world, l, wall_c.darkened(0.12 * l))
+	# The roof deck: the building's top plus an overhang.
+	box(world, Vector3(0, -SLAB / 2, 0), Vector3(HALF * 2, SLAB, HALF * 2), floor_c)
+	var extra := ROOF_HALF - HALF
+	for sz in [-1.0, 1.0]:
+		box(world, Vector3(0, -SLAB / 2, sz * (HALF + extra / 2)), Vector3(ROOF_HALF * 2, SLAB, extra), floor_c)
+		box(world, Vector3(sz * (HALF + extra / 2), -SLAB / 2, 0), Vector3(extra, SLAB, HALF * 2), floor_c)
+	_roof(world)
+	_shell(world, wall_c)
 	_city(world)
 
 
-static func _ramp(world: Node3D, hx: float, y: float, c: Color) -> void:
-	var drop := FLOOR_H
-	var run := RAMP_HALF_LEN * 2.0
-	var ang := atan2(drop, run)
-	var length := sqrt(drop * drop + run * run)
-	var t := 0.4
-	var n := Vector3(0, cos(ang), sin(ang))
-	var center := Vector3(hx, y - drop / 2, 0) - n * (t / 2)
-	box(world, center, Vector3(4, t, length), c, true, Vector3(ang, 0, 0))
+## The building seen from outside: just walls. What's inside the elevator is its own
+## world (see Floors) and doesn't have to match.
+static func _shell(world: Node3D, wc: Color) -> void:
+	var h := -level_y(DEEPEST) - SLAB + 0.5
+	var cy := -SLAB - h / 2
+	box(world, Vector3(0, cy, -HALF - 0.25), Vector3(31, h, 0.5), wc)
+	box(world, Vector3(0, cy, HALF + 0.25), Vector3(31, h, 0.5), wc)
+	box(world, Vector3(-HALF - 0.25, cy, 0), Vector3(0.5, h, 31), wc)
+	box(world, Vector3(HALF + 0.25, cy, 0), Vector3(0.5, h, 31), wc)
+	box(world, Vector3(0, cy, 0), Vector3(HALF * 2, h, HALF * 2), wc.darkened(0.3))
+	for l in range(1, DEEPEST + 1):   # dark window bands so it still reads as floors
+		for sgn in [-1.0, 1.0]:
+			box(world, Vector3(0, level_y(l) + 2.2, sgn * (HALF + 0.52)), Vector3(28, 1.4, 0.05), Color(0.05, 0.06, 0.1), false, Vector3.ZERO, 0.2)
+			box(world, Vector3(sgn * (HALF + 0.52), level_y(l) + 2.2, 0), Vector3(0.05, 1.4, 28), Color(0.05, 0.06, 0.1), false, Vector3.ZERO, 0.2)
 
 
 static func _roof(world: Node3D) -> void:
@@ -180,47 +163,14 @@ static func _roof(world: Node3D) -> void:
 	label(world, "dinner (interrupted)", Vector3(-5, 1.6, 7), 40)
 	box(world, Vector3(4, 0.4, -8), Vector3(1.2, 0.8, 0.8), Color(0.25, 0.35, 0.2))
 	label(world, "MILITARY RADIO", Vector3(4, 1.4, -8), 40, Color(0.6, 1, 0.6))
-	label(world, "STAIRS DOWN", Vector3(hole_x(0), 1.6, -9), 48, Color(1, 0.85, 0.4))
+	roof_cab = Floors.build_cab(world, ROOF_CAB_FRONT, Color(0.45, 0.45, 0.5))
+	label(world, "ELEVATOR DOWN", ROOF_CAB_FRONT + Vector3(-2.0, 3.9, 0), 56, Color(1, 0.85, 0.4))
 	var string_light := OmniLight3D.new()
-	string_light.position = Vector3(0, 3.5, 4)
+	string_light.position = Vector3(-6, 3.5, 5)
 	string_light.light_color = Color(1, 0.8, 0.55)
 	string_light.light_energy = 1.2
 	string_light.omni_range = 20
 	world.add_child(string_light)
-
-
-static func _interior(world: Node3D, l: int, wc: Color) -> void:
-	var y := level_y(l)
-	var h := FLOOR_H - SLAB
-	var cy := y + h / 2
-	var m := mirror(l)
-	box(world, Vector3(0, cy, -HALF - 0.25), Vector3(31, h, 0.5), wc)
-	box(world, Vector3(0, cy, HALF + 0.25), Vector3(31, h, 0.5), wc)
-	box(world, Vector3(-HALF - 0.25, cy, 0), Vector3(0.5, h, 31), wc)
-	box(world, Vector3(HALF + 0.25, cy, 0), Vector3(0.5, h, 31), wc)
-	# Wall A splits the floor in half; doors at z -9..-6 and 4..7
-	for seg in [[-15.0, -9.0], [-6.0, 4.0], [7.0, 15.0]]:
-		box(world, Vector3(0, cy, (seg[0] + seg[1]) / 2), Vector3(0.3, h, absf(seg[1] - seg[0])), wc)
-	for seg in [[-10.0, -6.0], [-3.0, 0.0]]:
-		_xwall(world, 9.0, seg[0] * m, seg[1] * m, cy, h, wc)
-	for seg in [[0.0, 4.0], [7.0, 10.0]]:
-		_xwall(world, -9.0, seg[0] * m, seg[1] * m, cy, h, wc)
-	for p in [Vector2(-8, 0), Vector2(8, 5), Vector2(3, -13), Vector2(-3, 12)]:
-		box(world, Vector3(p.x * m, y + 0.6, p.y), Vector3(1.2, 1.2, 1.2), Color(0.45, 0.35, 0.22))
-	var t := (l - 1) / 2.0
-	var col := Color(1.0, 0.85, 0.7).lerp(Color(1.0, 0.25, 0.2), t)
-	for p in [Vector2(-7, -7), Vector2(7, -7), Vector2(-7, 7), Vector2(7, 7)]:
-		var o := OmniLight3D.new()
-		o.position = Vector3(p.x, y + 4.8, p.y)
-		o.light_color = col
-		o.light_energy = 1.3 - 0.35 * (l - 1)
-		o.omni_range = 12
-		world.add_child(o)
-	label(world, "DEPTH %d" % l, Vector3(hole_x(l - 1) * 0.85, y + 2.6, 10), 72, col)
-
-
-static func _xwall(world: Node3D, z: float, x0: float, x1: float, cy: float, h: float, c: Color) -> void:
-	box(world, Vector3((x0 + x1) / 2, cy, z), Vector3(absf(x1 - x0), h, 0.3), c)
 
 
 static func _environment(world: Node3D) -> void:

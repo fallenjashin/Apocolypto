@@ -8,11 +8,11 @@ extends RigidBody3D
 ## Tune these freely. struggle vs HOLD_FORCE decides how many people it takes.
 const SPECIES := {
 	"skitter": {"label": "Skitter", "color": Color(0.55, 0.9, 0.3), "size": 0.6, "mass": 15.0,
-		"speed": 5.0, "stun": 6.0, "struggle": 1300.0, "value": 40, "floor": 1, "temper": "skittish"},
+		"speed": 5.0, "stun": 6.0, "struggle": 1300.0, "value": 40, "temper": "skittish"},
 	"brute": {"label": "Brute", "color": Color(0.85, 0.35, 0.25), "size": 1.3, "mass": 70.0,
-		"speed": 2.5, "stun": 9.0, "struggle": 1700.0, "value": 150, "floor": 2, "temper": "territorial"},
+		"speed": 2.5, "stun": 9.0, "struggle": 1700.0, "value": 150, "temper": "territorial"},
 	"glimmer": {"label": "Glimmer", "color": Color(0.5, 0.6, 1.0), "size": 0.5, "mass": 10.0,
-		"speed": 10.0, "stun": 3.5, "struggle": 1500.0, "value": 350, "floor": 3, "temper": "shy", "volatile": true, "blinker": true},
+		"speed": 10.0, "stun": 3.5, "struggle": 1500.0, "value": 350, "temper": "shy", "volatile": true, "blinker": true},
 }
 ## Each species has a temper: a rule that changes what the crew has to do.
 ## "hint" is shown on the crosshair readout so players can learn it.
@@ -255,7 +255,10 @@ func homesick() -> bool:
 
 func _wander_plan(delta: float) -> Vector3:
 	if homesick():
-		var back := home - global_position
+		var goal := home
+		if not game.floor_info.is_empty():
+			goal = Floors.next_step(game.floor_info.maze, global_position, home)   # around the walls
+		var back := goal - global_position
 		back.y = 0.0
 		wander_t = 0.0
 		return back.normalized() * float(spec.speed) * 0.5
@@ -370,13 +373,13 @@ func _plan_shy(delta := 0.0) -> Vector3:
 	return _flee_plan(FLEE_RADIUS, 1.0)
 
 
-## Where a blink lands: a spawn spot on this floor that's far from every player.
+## Where a blink lands: an open maze cell that's far from every player.
 func blink_target() -> Vector3:
-	var floor_l := Level.floor_of(global_position.y)
 	var options: Array[Vector3] = []
 	var best := global_position
 	var best_d := -1.0
-	for pt in Level.spawn_points(floor_l):
+	var cells: Array = game.floor_info.get("cells", [])
+	for pt in cells:
 		var nearest := INF
 		for c in game.players_root.get_children():
 			nearest = minf(nearest, (c as Node3D).global_position.distance_to(pt))

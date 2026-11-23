@@ -24,6 +24,10 @@ var shop_root: Control
 var shop_list: VBoxContainer
 var shop_bank_lbl: Label
 var shop_open := false
+var elevator_root: Control
+var elevator_list: VBoxContainer
+var elevator_title: Label
+var elevator_open := false
 
 
 func _ready() -> void:
@@ -74,9 +78,10 @@ func _ready() -> void:
 	help.anchor_bottom = 1.0
 	help.offset_left = -330
 	help.offset_top = -120
-	help.text = "WASD move  ·  Shift sprint  ·  Space jump\nLeft click: stun prod\nHold right click: grab / carry\nB (on the roof): military store\nEsc: free the mouse"
-	help.offset_top = -140
+	help.text = "WASD move  ·  Shift sprint  ·  Space jump\nLeft click: stun prod\nHold right click: grab / carry\nB (on the roof): military store\nE inside the elevator: use its panel\nEsc: free the mouse"
+	help.offset_top = -175
 	_build_shop()
+	_build_elevator()
 
 
 func _build_shop() -> void:
@@ -109,6 +114,99 @@ func _build_shop() -> void:
 	foot.add_theme_font_size_override("font_size", 14)
 	foot.modulate = Color(1, 1, 1, 0.7)
 	v.add_child(foot)
+
+
+func _build_elevator() -> void:
+	elevator_root = CenterContainer.new()
+	elevator_root.set_anchors_preset(Control.PRESET_FULL_RECT)
+	elevator_root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	elevator_root.visible = false
+	add_child(elevator_root)
+	var panel := PanelContainer.new()
+	elevator_root.add_child(panel)
+	var margin := MarginContainer.new()
+	for side in ["left", "right", "top", "bottom"]:
+		margin.add_theme_constant_override("margin_" + side, 22)
+	panel.add_child(margin)
+	var v := VBoxContainer.new()
+	v.add_theme_constant_override("separation", 10)
+	margin.add_child(v)
+	elevator_title = Label.new()
+	elevator_title.add_theme_font_size_override("font_size", 34)
+	v.add_child(elevator_title)
+	elevator_list = VBoxContainer.new()
+	elevator_list.add_theme_constant_override("separation", 8)
+	v.add_child(elevator_list)
+	var foot := Label.new()
+	foot.text = "Everyone standing inside rides together, and so does any loot in there with them.   E or Esc to close."
+	foot.add_theme_font_size_override("font_size", 14)
+	foot.modulate = Color(1, 1, 1, 0.7)
+	v.add_child(foot)
+
+
+func open_elevator() -> void:
+	elevator_open = true
+	elevator_root.visible = true
+	refresh_elevator()
+
+
+func close_elevator() -> void:
+	elevator_open = false
+	elevator_root.visible = false
+
+
+func refresh_elevator() -> void:
+	var p := game.local_player()
+	if p == null:
+		return
+	var where := game.cab_of(p.global_position)
+	for c in elevator_list.get_children():
+		elevator_list.remove_child(c)
+		c.queue_free()
+	if where == 0:
+		elevator_title.text = "ELEVATOR  ·  roof"
+		for f in Floors.LIST.size():
+			var d: Dictionary = Floors.LIST[f]
+			var row := HBoxContainer.new()
+			row.add_theme_constant_override("separation", 18)
+			var info := VBoxContainer.new()
+			info.custom_minimum_size.x = 520
+			var name_lbl := Label.new()
+			name_lbl.text = "Floor %d   ·   %d specimens   ·   avg $%d each" % [d.number, d.count, roundi(Floors.average_value(f))]
+			name_lbl.add_theme_font_size_override("font_size", 20)
+			info.add_child(name_lbl)
+			var mix := Label.new()
+			mix.text = Floors.mix_text(f)
+			mix.add_theme_font_size_override("font_size", 14)
+			mix.modulate = Color(1, 1, 1, 0.7)
+			info.add_child(mix)
+			row.add_child(info)
+			var btn := Button.new()
+			btn.custom_minimum_size = Vector2(130, 40)
+			btn.text = "Descend"
+			var problem := game.travel_problem(p, f)
+			btn.disabled = problem != ""
+			btn.tooltip_text = problem
+			btn.pressed.connect(func(): game.request_travel.rpc_id(1, f))
+			row.add_child(btn)
+			elevator_list.add_child(row)
+	elif where == 1:
+		elevator_title.text = "ELEVATOR  ·  floor %d" % int(Floors.LIST[game.active_floor].number)
+		var btn := Button.new()
+		btn.custom_minimum_size = Vector2(260, 44)
+		btn.text = "Ride up to the roof"
+		var problem := game.travel_problem(p, -1)
+		btn.disabled = problem != ""
+		btn.tooltip_text = problem
+		btn.pressed.connect(func(): game.request_travel.rpc_id(1, -1))
+		elevator_list.add_child(btn)
+	if where >= 0:
+		var closed: bool = game.doors[where]
+		var dbtn := Button.new()
+		dbtn.custom_minimum_size = Vector2(260, 44)
+		dbtn.text = "Open the doors" if closed else "Close the doors"
+		dbtn.pressed.connect(func(): game.request_doors.rpc_id(1, not closed))
+		elevator_list.add_child(dbtn)
 
 
 func open_shop() -> void:
@@ -198,7 +296,7 @@ func _build_menu() -> Control:
 	title.add_theme_font_size_override("font_size", 48)
 	v.add_child(title)
 	var sub := Label.new()
-	sub.text = "Prototype 1: capture & haul  ·  build 8"
+	sub.text = "Prototype 1: capture & haul  ·  build 9"
 	v.add_child(sub)
 	var desc := Label.new()
 	desc.autowrap_mode = TextServer.AUTOWRAP_WORD
@@ -271,6 +369,8 @@ func run_changed(msg: String) -> void:
 			game.close_shop()
 		else:
 			refresh_shop()
+	if elevator_open:
+		refresh_elevator()
 
 
 func _top_text() -> String:
@@ -328,7 +428,9 @@ func _process(delta: float) -> void:
 	var where := Level.floor_of(p.global_position.y)
 	var recharge := "  (recharging)" if where == 0 and p.charges < p.max_charges() else ""
 	var store_hint := "\nPress B to open the store" if where == 0 and not shop_open else ""
-	bottom_lbl.text = "%s\nProd charges [%s]%s%s" % [Game.DEPTH_NAMES[where], bar, recharge, store_hint]
+	if game.cab_of(p.global_position) >= 0 and not elevator_open:
+		store_hint += "\nPress E to use the elevator"
+	bottom_lbl.text = "%s\nProd charges [%s]%s%s" % [game.location_name(p), bar, recharge, store_hint]
 	var held := game.held_spec_of(p.peer_id)
 	if held:
 		var n := held.held_by.size()

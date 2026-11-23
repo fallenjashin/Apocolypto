@@ -23,6 +23,7 @@ Everything is gray boxes on purpose. Don't add art until that answer is yes.
 | Hold right click | Grab and carry |
 | Esc | Free the mouse (click to recapture) |
 | B | Open the military store (on the roof only) |
+| E | Use the panel inside an elevator (pick a floor, close/open the doors) |
 | R | Host only: start a new run after winning or losing |
 
 ## The run
@@ -36,7 +37,7 @@ A run is **4 days**. Each day has a **5-minute clock** and a **quota** you must 
 - **Earned today** counts toward the quota and resets every day. The **bank** keeps everything you've ever earned (it's what the store spends).
   Earn more than the quota and the surplus stays in the bank.
 - Miss the quota by even $1 when the clock hits zero and the run ends: **OVERRUN**.
-- Make it and you get a **day summary** (12 seconds), then the next day starts: the building is restocked and the crew is back on the roof with full prods.
+- Make it and you get a **day summary** (12 seconds), then the next day starts: the floors close and the crew is back on the roof with full prods.
 - Make the day 4 quota and you **win**. The host presses **R** to start a fresh run.
 - The host's computer owns the clock; everyone else counts down locally and is corrected twice a second.
 - Day 1 starts with a 16-second wait so the opening cinematic can play. Later days start after 6 seconds.
@@ -68,10 +69,21 @@ Each species has a temper that changes what the crew has to do. The crosshair re
 | Glimmer | Shy | Faster than a sprint (10 vs 8). **Blinks:** when a player gets within 9 m it flickers for 0.25 s, then teleports to a spot at least 10 m from everyone (5 s cooldown). A stun during the flicker cancels it. Freezes solid only while 2+ players have it near the middle of their view (within 16 m), and a frozen Glimmer can't blink. **Volatile:** when its stun wears off it has a 3 s fuse, and if nobody stuns it again it explodes. The loot is lost and everyone within 7 m is thrown back and drops what they carry. | Two people stare to pin it, one closes in. Keep a prod charge ready for the re-stun |
 
 Fleeing specimens look for open space ahead, so they can't be pinned against walls or run off roof edges and down holes.
-Specimens that get dropped away from their spawn spot (same floor) walk back toward it. There's no pathing between floors yet.
+Specimens that get dropped away from their spawn spot walk back to it along the maze route (breadth-first search on the maze grid).
 
 Tells: a hunting Brute pulses red ("ENRAGED!") a frozen Glimmer glows white ("FROZEN"), and a Glimmer on its fuse blinks faster and faster ("UNSTABLE"). Looks ignore walls for now.
 Numbers are at the top of `scripts/specimen.gd`. They're a first guess. Tune them after playtests.
+
+## The elevator and the floors
+
+The roof has an elevator (the grey box). Step inside and press **E**: pick a floor, or close/open the doors.
+Everyone standing in the cab rides together, **and so does any loot in there with them**. That is how you bring catches up to the roof pen.
+
+- Only one floor exists at a time, and it is nowhere near what the building looks like from outside. It is a **maze of 6 m cells** grown from a seed, so every peer builds the same one without sending the layout.
+- Floors are data. Floors 10, 9 and 8 are your design (75/20/5, 30/50/20, 30/30/40 skitter/brute/glimmer). Floors 7 and 6 are my extrapolation.
+- Leaving a floor closes it: whatever you left behind is gone. A new descent grows a fresh maze with a fresh set of specimens.
+- The elevator only runs while the day's clock is running, and a floor can only be opened while nobody is on a different one.
+- Every cell of every floor is reachable from the elevator (tested over 100 mazes).
 
 ## The rules being tested
 
@@ -80,7 +92,7 @@ Numbers are at the top of `scripts/specimen.gd`. They're a first guess. Tune the
   An *awake* specimen struggles harder than one person can hold (1300 to 1700 N), so it breaks free.
   Two people out-pull it. That co-op rule comes from the physics, not a scripted check.
 - **Weight slows you down.** You can drag a Brute (70 kg) alone, but it's slow. With two people it's much faster.
-- **Depth = value.** Depth 1 has Skitters ($40), Depth 2 has Brutes ($150), Depth 3 has Glimmers ($350, fast, with a short stun).
+- **Deeper floors pay more.** Each floor is data (`Floors.LIST` in `scripts/floors.gd`): its maze size, how many specimens it holds and what mix of species.
 - **Loot becomes data.** When a specimen reaches the pen, the physics object is deleted and becomes a ledger entry.
   Nothing piles up, so there's no Lethal Company-style loot lag or disappearing items.
 
@@ -107,7 +119,8 @@ The sounds are generated in code (no audio files yet). Timing is at the top of `
 | `scripts/game.gd` | Host/join, spawning, server-side stun/grab requests, the pen and ledger, test modes |
 | `scripts/player.gd` | First-person movement, prod, grab, aim assist |
 | `scripts/specimen.gd` | Species table, struggle physics, flee/wander AI (server only) |
-| `scripts/level.gd` | Builds the building, roof camp, burning city and crater in code |
+| `scripts/level.gd` | Builds the roof camp, the building's outer shell, the burning city and the crater in code |
+| `scripts/floors.gd` | Floor data (species mixes), seeded mazes, maze pathfinding, the elevator cab |
 | `scripts/hud.gd` | Menu and HUD |
 | `scripts/intro.gd` | The asteroid-impact opening |
 
@@ -119,7 +132,8 @@ Clients send requests and the host validates them (for example, it checks that y
 ```
 ./tests/run_tests.sh /path/to/godot
 ```
-- `--selftest`: population spawns on the right floors, a stunned specimen stays held, an awake one escapes one holder,
+- `--selftest`: floor mixes add up, mazes are connected and identical for a given seed, the elevator carries the crew and loot,
+  a stunned specimen stays held, a stunned specimen stays held, an awake one escapes one holder,
   two holders can hold it, and the pen pays out and deletes the object.
 - `--autotest-host` + `--autotest-join`: two real processes over the network. The client stuns and grabs, the host sees it,
   the delivery happens, and the client's ledger updates.
@@ -128,6 +142,5 @@ Clients send requests and the host validates them (for example, it checks that y
 
 1. Steam lobbies and invites (GodotSteam) instead of IP + port.
 2. Proximity voice chat.
-3. Random floor layouts, so runs don't repeat.
-4. The infestation climbing the floors, and the rooftop last stand.
-5. Real art, only after the rest feels good.
+3. The infestation climbing the floors, and the rooftop last stand.
+4. Real art, only after the rest feels good.

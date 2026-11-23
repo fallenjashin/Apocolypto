@@ -133,13 +133,17 @@ func _unhandled_input(event: InputEvent) -> void:
 	elif event.is_action_pressed("menu"):
 		if game.hud.shop_open:
 			game.close_shop()
+		elif game.hud.elevator_open:
+			game.close_elevator()
 		else:
 			Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	elif event.is_action_pressed("shop"):
 		game.toggle_shop()
+	elif event.is_action_pressed("interact"):
+		game.toggle_elevator()
 	elif event.is_action_pressed("prod"):
-		if game.hud.shop_open:
-			return   # clicking the world shouldn't close the store by accident
+		if game.hud.shop_open or game.hud.elevator_open:
+			return   # clicking the world shouldn't close a panel by accident
 		if Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
 			game.capture_mouse()
 		else:

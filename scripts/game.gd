@@ -8,9 +8,7 @@ extends Node3D
 
 const PORT := 7777
 const MAX_PLAYERS := 4
-const POPULATION := {"skitter": 4, "brute": 2, "glimmer": 1}
 const RESPAWN_DELAY := 20.0
-const DEPTH_NAMES := ["ROOF (camp)", "DEPTH 1: Skitters", "DEPTH 2: Brutes", "DEPTH 3: Glimmers"]
 
 # The run: DAYS days. Each day you must earn that day's quota before the clock runs out.
 # Surplus earnings stay in the bank (to be spent in the store); the quota resets every day.
@@ -40,6 +38,12 @@ var upgrades := {}        # store upgrades, crew-wide: {"battery": 1, ...}
 var daylight_bought := 0  # Floodlights bought today
 var next_spec_id := 0
 var respawn_queue: Array = []   # [[seconds_left, species], ...] (server only)
+var world_node: Node3D
+var active_floor := -1        # which expedition floor exists right now (-1 = none)
+var floor_seed := 0
+var floor_info := {}          # what Floors.build returned for the active floor
+var floor_runs := 0           # how many floors have been opened (makes each maze different)
+var doors := [false, false]   # elevator doors closed? [roof, floor]
 var test_mode := ""
 var test_failures := 0
 
@@ -47,6 +51,7 @@ var test_failures := 0
 func _ready() -> void:
 	_setup_input()
 	Level.build(self)
+	world_node = get_node("World")
 	players_root = Node3D.new()
 	players_root.name = "Players"
 	add_child(players_root)
@@ -91,7 +96,7 @@ func _make_spawner(n: String, path: String, fn: Callable) -> MultiplayerSpawner:
 func _setup_input() -> void:
 	var keys := {"fwd": KEY_W, "back": KEY_S, "left": KEY_A, "right": KEY_D,
 		"jump": KEY_SPACE, "sprint": KEY_SHIFT, "menu": KEY_ESCAPE, "restart": KEY_R,
-		"shop": KEY_B}
+		"shop": KEY_B, "interact": KEY_E}
 	for action in keys:
 		if not InputMap.has_action(action):
 			InputMap.add_action(action)
@@ -197,20 +202,214 @@ func _spawn_specimen_node(data: Variant) -> Node:
 	return s
 
 
+## Server only. Puts one specimen on the active floor, on a random open cell away from
+## the crew. Does nothing when no floor is open.
 func spawn_specimen(sp: String) -> void:
-	var floor_l: int = Specimen.SPECIES[sp].floor
-	var pts := Level.spawn_points(floor_l)
-	var pos: Vector3 = pts.pick_random()
-	for attempt in 10:
+	if active_floor < 0 or floor_info.is_empty():
+		return
+	var cells: Array = floor_info.cells
+	var pos: Vector3 = cells.pick_random()
+	for attempt in 12:
 		var clear := true
 		for s in specimens():
 			if s.global_position.distance_to(pos) < 2.0:
 				clear = false
+		for c in players_root.get_children():
+			if (c as Node3D).global_position.distance_to(pos) < 12.0:
+				clear = false
 		if clear:
 			break
-		pos = pts.pick_random()
+		pos = cells.pick_random()
+	pos += Vector3(randf_range(-1.5, 1.5), 0.0, randf_range(-1.5, 1.5))
 	next_spec_id += 1
 	specimen_spawner.spawn(["S%d" % next_spec_id, sp, pos])
+
+
+# --- The elevator and the floors ---------------------------------------------
+
+func cab_of(pos: Vector3) -> int:
+	if Floors.in_zone(Level.roof_cab, pos):
+		return 0
+	if Floors.in_zone(floor_info.get("cab", {}), pos):
+		return 1
+	return -1
+
+
+func players_on_floor() -> int:
+	var n := 0
+	for c in players_root.get_children():
+		if Level.floor_of((c as Node3D).global_position.y) != 0:
+			n += 1
+	return n
+
+
+func location_name(p: Player) -> String:
+	if Level.floor_of(p.global_position.y) == 0 or active_floor < 0:
+		return "ROOF (camp)"
+	return "FLOOR %d" % int(Floors.LIST[active_floor].number)
+
+
+## Why `p` can't ride to `target` (-1 = the roof, 0.. = a floor) right now. "" means they can.
+func travel_problem(p: Player, target: int) -> String:
+	if phase != Phase.PLAYING:
+		return "The elevator only runs while the day's clock is running."
+	var where := cab_of(p.global_position)
+	if where < 0:
+		return "Stand inside the elevator first."
+	if where == 0:
+		if target < 0 or target >= Floors.LIST.size():
+			return "Pick a floor."
+		if active_floor >= 0 and active_floor != target and players_on_floor() > 0:
+			return "The crew is down on floor %d. The elevator serves one floor at a time." % int(Floors.LIST[active_floor].number)
+	elif target != -1:
+		return "From a floor, the elevator only goes up to the roof."
+	return ""
+
+
+@rpc("any_peer", "call_local", "reliable")
+func request_travel(target: int) -> void:
+	if not multiplayer.is_server():
+		return
+	var id := _sender()
+	var p := get_player(id)
+	if p == null:
+		return
+	var problem := travel_problem(p, target)
+	if problem != "":
+		notify.rpc_id(id, problem)
+		return
+	_travel(p, target)
+
+
+## Server only. Rides everyone standing in the cab to the other end, plus any
+## specimens in there with them (that is how you bring loot up).
+func _travel(p: Player, target: int) -> void:
+	var from_cab: Dictionary = Level.roof_cab if cab_of(p.global_position) == 0 else floor_info.cab
+	var riders: Array[Player] = []
+	for c in players_root.get_children():
+		if Floors.in_zone(from_cab, (c as Node3D).global_position):
+			riders.append(c as Player)
+	var cargo: Array[Specimen] = []
+	for s in specimens():
+		if Floors.in_zone(from_cab, s.global_position):
+			cargo.append(s)
+	if target >= 0 and active_floor != target:
+		if active_floor >= 0:
+			_deactivate_floor()
+		_activate_floor(target)
+	var to_cab: Dictionary = Level.roof_cab if target < 0 else floor_info.cab
+	var src: Vector3 = from_cab.zone_c
+	var dst: Vector3 = to_cab.zone_c
+	for r in riders:
+		var spot := dst + (r.global_position - src)
+		spot.y = dst.y - 1.0 + 0.05
+		teleport_player.rpc(r.peer_id, spot)
+	for s in cargo:
+		s.global_position = dst + (s.global_position - src)
+		s.linear_velocity = Vector3.ZERO
+	if target < 0 and players_on_floor() == 0:
+		_deactivate_floor()
+	if target >= 0:
+		_broadcast("The crew rides down to floor %d." % int(Floors.LIST[target].number))
+	else:
+		_broadcast("The crew rides up to the roof.")
+
+
+@rpc("authority", "call_local", "reliable")
+func teleport_player(id: int, pos: Vector3) -> void:
+	var p := local_player()
+	if p and p.peer_id == id:
+		p.global_position = pos
+		p.velocity = Vector3.ZERO
+		if hud.elevator_open:
+			close_elevator()
+
+
+## Server only: opens a floor, fills it with specimens in the floor's mix.
+func _activate_floor(idx: int) -> void:
+	floor_runs += 1
+	var seed_v := hash([day, idx, floor_runs])
+	set_active_floor.rpc(idx, seed_v)
+	var counts := Floors.counts(idx)
+	for sp in counts:
+		for i in counts[sp]:
+			spawn_specimen(sp)
+
+
+## Server only: closes the floor. Anything still down there is lost, like loot left behind.
+func _deactivate_floor() -> void:
+	if active_floor < 0:
+		return
+	for s in specimens():
+		if Level.floor_of(s.global_position.y) != 0:
+			s.queue_free()
+	respawn_queue.clear()
+	set_active_floor.rpc(-1, 0)
+
+
+@rpc("authority", "call_local", "reliable")
+func set_active_floor(idx: int, seed_v: int) -> void:
+	_build_floor(idx, seed_v)
+
+
+## Runs on every peer: builds (or removes) the floor geometry from its seed.
+func _build_floor(idx: int, seed_v: int) -> void:
+	if floor_info.has("root") and is_instance_valid(floor_info.root):
+		world_node.remove_child(floor_info.root)
+		floor_info.root.queue_free()
+	floor_info = {}
+	active_floor = idx
+	floor_seed = seed_v
+	doors[1] = false
+	if idx >= 0:
+		floor_info = Floors.build(world_node, idx, seed_v)
+	_apply_doors()
+
+
+func _apply_doors() -> void:
+	if Level.roof_cab.has("door"):
+		Floors.set_door(Level.roof_cab.door, doors[0])
+	if floor_info.has("cab"):
+		Floors.set_door(floor_info.cab.door, doors[1])
+
+
+@rpc("any_peer", "call_local", "reliable")
+func request_doors(closed: bool) -> void:
+	if not multiplayer.is_server():
+		return
+	var p := get_player(_sender())
+	if p == null:
+		return
+	var where := cab_of(p.global_position)
+	if where >= 0:
+		set_door.rpc(where, closed)
+
+
+@rpc("authority", "call_local", "reliable")
+func set_door(where: int, closed: bool) -> void:
+	doors[where] = closed
+	_apply_doors()
+	if hud.elevator_open:
+		hud.refresh_elevator()
+
+
+func toggle_elevator() -> void:
+	if hud.elevator_open:
+		close_elevator()
+		return
+	var p := local_player()
+	if p == null or cab_of(p.global_position) < 0:
+		hud.toast("Step inside the elevator and press E at its panel.")
+		return
+	if hud.shop_open:
+		close_shop()
+	hud.open_elevator()
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+
+
+func close_elevator() -> void:
+	hud.close_elevator()
+	capture_mouse()
 
 
 # --- Queries used by players, specimens, HUD ---------------------------------
@@ -344,12 +543,11 @@ func _begin_day(briefing: float) -> void:
 	time_left = DAY_SECONDS
 	earned_today = 0
 	daylight_bought = 0
-	for s in specimens():
+	for s in specimens():   # a new day: nothing left over, on the roof or below
 		s.queue_free()
+	_deactivate_floor()
+	set_door.rpc(0, false)
 	respawn_queue.clear()
-	for sp in POPULATION:
-		for i in POPULATION[sp]:
-			spawn_specimen(sp)
 	reset_players.rpc()
 	_broadcast("Day %d of %d. Quota: $%d." % [day, DAYS, quota()])
 
@@ -365,7 +563,8 @@ func reset_players() -> void:
 func _state_dict() -> Dictionary:
 	return {"day": day, "phase": int(phase), "phase_t": phase_t, "time_left": time_left,
 		"earned": earned_today, "bank": credits, "delivered": delivered,
-		"upgrades": upgrades, "daylight": daylight_bought}
+		"upgrades": upgrades, "daylight": daylight_bought,
+		"floor": active_floor, "fseed": floor_seed, "doors": doors}
 
 
 @rpc("authority", "call_local", "reliable")
@@ -379,6 +578,10 @@ func set_run_state(st: Dictionary, msg: String) -> void:
 	delivered = st.delivered
 	upgrades = st.upgrades.duplicate()
 	daylight_bought = st.daylight
+	if st.floor != active_floor or st.fseed != floor_seed:
+		_build_floor(st.floor, st.fseed)
+	doors = st.doors.duplicate()
+	_apply_doors()
 	hud.run_changed(msg)
 
 
@@ -546,6 +749,8 @@ func toggle_shop() -> void:
 		return
 	if phase == Phase.WON or phase == Phase.LOST:
 		return
+	if hud.elevator_open:
+		close_elevator()
 	hud.open_shop()
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 
@@ -594,7 +799,7 @@ func _physics_process(delta: float) -> void:
 		if Level.in_pen(s.global_position):
 			if not run_over:
 				_deliver(s)
-		elif s.global_position.y < Level.level_y(Level.DEEPEST) - 10.0:
+		elif Level.fell_out(s.global_position.y):
 			respawn_queue.append([2.0, s.species])
 			s.queue_free()
 	for entry in respawn_queue:
@@ -636,7 +841,7 @@ func _check(ok: bool, what: String) -> void:
 
 func _place_near(p: Player, s: Specimen) -> void:
 	var at := s.global_position
-	p.global_position = Vector3(at.x + 1.4, Level.level_y(Level.floor_of(at.y)) + 0.05, at.z)
+	p.global_position = Vector3(at.x + 1.4, Level.ground_y(at.y) + 0.05, at.z)
 	p.velocity = Vector3.ZERO
 	p.rotation.y = atan2(-(at.x - p.global_position.x), -(at.z - p.global_position.z))
 	p.head.rotation.x = -0.5
@@ -645,6 +850,7 @@ func _place_near(p: Player, s: Specimen) -> void:
 func _autotest_host() -> void:
 	_watchdog(40.0)
 	host()
+	_activate_floor(0)   # the crew "rode down" before the client joined: it must catch up on join
 	var target: Specimen = null
 	while target == null:
 		await get_tree().physics_frame
@@ -670,11 +876,13 @@ func _autotest_host() -> void:
 func _autotest_join() -> void:
 	_watchdog(40.0)
 	join("127.0.0.1")
-	var total: int = 0
-	for sp in POPULATION:
-		total += POPULATION[sp]
-	while local_player() == null or specimens().size() < total:
+	var total: int = Floors.LIST[0].count
+	while local_player() == null or specimens().size() < total or floor_info.is_empty():
 		await get_tree().process_frame
+	if active_floor != 0:
+		print("AUTOTEST JOIN: FAIL (joined a crew on floor 0 but sees floor %d)" % active_floor)
+		get_tree().quit(1)
+		return
 	print("[join] connected as %d, sees %d specimens and %d players" % [
 		multiplayer.get_unique_id(), specimens().size(), players_root.get_child_count()])
 	var s: Specimen = null
@@ -719,18 +927,110 @@ func _selftest() -> void:
 	_watchdog(40.0)
 	host()
 	await _wait(0.3)
-	print("Population spawned:")
+	print("Floor data:")
+	var p := local_player()
+	var data_ok := true
+	var avgs: Array[float] = []
+	for f in Floors.LIST.size():
+		var d: Dictionary = Floors.LIST[f]
+		var share := 0.0
+		for sp in d.mix:
+			share += float(d.mix[sp])
+		var n := 0
+		var cnt := Floors.counts(f)
+		for sp in cnt:
+			n += int(cnt[sp])
+		if not is_equal_approx(share, 1.0) or n != int(d.count):
+			data_ok = false
+		avgs.append(Floors.average_value(f))
+	_check(data_ok, "every floor's mix adds up to 100% and its specimen counts add up to its total")
+	_check(Floors.counts(0) == {"skitter": 10, "brute": 3, "glimmer": 1}, "floor 10 (75/20/5) holds 10 skitters, 3 brutes, 1 glimmer")
+	_check(Floors.counts(2) == {"skitter": 4, "brute": 4, "glimmer": 6}, "floor 8 (30/30/40) holds 4 skitters, 4 brutes, 6 glimmers")
+	var rising := true
+	for i in range(1, avgs.size()):
+		if avgs[i] <= avgs[i - 1]:
+			rising = false
+	_check(rising, "deeper floors pay more per specimen on average (%s)" % ", ".join(avgs.map(func(a): return "$%d" % roundi(a))))
+	print("Mazes:")
+	var m1 := Floors.generate(123, 8, 8)
+	var m2 := Floors.generate(123, 8, 8)
+	var m3 := Floors.generate(124, 8, 8)
+	_check(m1.e == m2.e and m1.s == m2.s, "the same seed always grows the same maze (so every peer builds the same floor)")
+	_check(m1.e != m3.e or m1.s != m3.s, "a different seed grows a different maze")
+	var connected := true
+	for f in Floors.LIST.size():
+		for sd in 20:
+			var mz := Floors.generate(sd * 7 + f, Floors.LIST[f].cells.x, Floors.LIST[f].cells.y)
+			if Floors.reachable_cells(mz) != int(mz.w) * int(mz.h):
+				connected = false
+	_check(connected, "every cell of every floor can be reached from the elevator (100 mazes checked)")
+	var route := Floors.path(m1, Vector2i(0, 0), Vector2i(7, 7))
+	var steps_ok := route.size() > 1 and route[0] == Vector2i(0, 0) and route[-1] == Vector2i(7, 7)
+	for i in range(1, route.size()):
+		if not Floors.open_between(m1, route[i - 1], route[i] - route[i - 1]):
+			steps_ok = false
+	_check(steps_ok, "pathfinding finds a route through open doorways (%d cells)" % route.size())
+	var nxt := Floors.next_step(m1, Floors.cell_center(Vector2i(0, 0)), Floors.cell_center(Vector2i(7, 7)))
+	_check(nxt == Floors.cell_center(route[1]), "specimens heading home step to the next cell on the route")
+	print("Elevator:")
+	var stand: Vector3 = Level.roof_cab.zone_c + Vector3(0, -0.95, 0)
+	p.global_position = Vector3(-5, 0.05, -3)
+	request_travel.rpc_id(1, 0)
+	_check(active_floor == -1 and Level.floor_of(p.global_position.y) == 0, "standing outside the elevator, the button does nothing")
+	p.global_position = stand
+	request_travel.rpc_id(1, 0)
+	_check(active_floor == -1 and Level.floor_of(p.global_position.y) == 0, "it won't run until the day's clock starts")
+	tick_run(FIRST_BRIEFING_SECONDS + 1.0)
+	_check(phase == Phase.PLAYING, "the day starts after the briefing")
+	_check(specimens().size() == 0 and active_floor == -1, "before anyone rides down no floor exists and no specimens are out")
+	request_travel.rpc_id(1, 0)
+	await get_tree().physics_frame
+	await get_tree().physics_frame
+	_check(active_floor == 0 and Level.floor_of(p.global_position.y) == 1 and Floors.in_zone(floor_info.cab, p.global_position),
+		"the crew rides down and arrives inside floor 10's elevator")
 	var counts := {}
+	var on_floor := true
 	for s in specimens():
 		counts[s.species] = counts.get(s.species, 0) + 1
-		_check(Level.floor_of(s.global_position.y) == int(s.spec.floor),
-			"%s %s spawned on depth %d" % [s.species, s.name, s.spec.floor])
-	_check(counts == POPULATION, "population matches %s" % str(POPULATION))
+		if absf(s.global_position.y - (Floors.EXP_Y + 1.0)) > 1.5:
+			on_floor = false
+	_check(counts == Floors.counts(0), "the floor is stocked with its mix %s" % str(counts))
+	_check(on_floor, "every specimen starts standing on the floor")
+	var ray := PhysicsRayQueryParameters3D.create(floor_info.cells[3] + Vector3(0, 2, 0), floor_info.cells[3] + Vector3(0, -2, 0))
+	var floor_hit := get_world_3d().direct_space_state.intersect_ray(ray)
+	_check(not floor_hit.is_empty() and absf(floor_hit.position.y - Floors.EXP_Y) < 0.1, "there is solid floor under the maze")
+	_check(travel_problem(p, 1) != "" and travel_problem(p, -1) == "", "from a floor the elevator only goes up")
+	var buddy2 := player_spawner.spawn([2]) as Player
+	buddy2.global_position = stand
+	_check(travel_problem(buddy2, 1) != "" and travel_problem(buddy2, 0) == "",
+		"someone on the roof can't open a second floor while the crew is on this one")
+	buddy2.queue_free()
+	await get_tree().physics_frame
+	request_doors.rpc_id(1, true)
+	await get_tree().physics_frame
+	await get_tree().process_frame
+	_check(doors[1] and not (floor_info.cab.door.get_child(0) as CollisionShape3D).disabled and floor_info.cab.door.visible,
+		"closing the doors makes a solid door")
+	request_doors.rpc_id(1, false)
+	await get_tree().physics_frame
+	await get_tree().process_frame
+	_check(not doors[1] and (floor_info.cab.door.get_child(0) as CollisionShape3D).disabled, "opening them clears the way")
+	var cargo := specimen_spawner.spawn(["C1", "skitter", floor_info.cab.zone_c + Vector3(0.5, -0.3, 0.4)]) as Specimen
+	var left_behind := specimen_spawner.spawn(["C2", "skitter", floor_info.cells[5]]) as Specimen
+	await get_tree().physics_frame
+	request_travel.rpc_id(1, -1)
+	await get_tree().physics_frame
+	_check(Level.floor_of(p.global_position.y) == 0 and Floors.in_zone(Level.roof_cab, p.global_position),
+		"riding up puts the crew in the roof elevator")
+	_check(Floors.in_zone(Level.roof_cab, cargo.global_position) and not cargo.is_queued_for_deletion(),
+		"loot that was in the elevator comes up with them")
+	_check(active_floor == -1 and (not is_instance_valid(left_behind) or left_behind.is_queued_for_deletion()) and floor_info.is_empty(),
+		"everything left on the floor is gone, and the floor is closed")
+	cargo.queue_free()
 	for s in specimens():
 		s.queue_free()
 	await get_tree().physics_frame
-	var p := local_player()
-	p.global_position = Vector3(-5, Level.level_y(1) + 0.05, -3)
+	p.global_position = Vector3(-5, 0.05, -3)
 	p.rotation.y = 0.0
 	p.head.rotation.x = -0.3
 	await _wait(0.3)
@@ -777,16 +1077,13 @@ func _selftest() -> void:
 	_check(not is_instance_valid(s) or s.is_queued_for_deletion(), "the physics object is gone after delivery")
 	_check(respawn_queue.size() == 1, "a replacement skitter is queued")
 	print("Run structure:")
-	var total := 0
-	for sp in POPULATION:
-		total += POPULATION[sp]
 	_check(earned_today == 40, "a delivery also counts toward today's quota (earned_today=%d)" % earned_today)
 	var qs := [quota_for(1), quota_for(2), quota_for(3), quota_for(4)]
 	_check(qs == QUOTAS and qs[0] < qs[1] and qs[1] < qs[2] and qs[2] < qs[3], "quotas rise every day %s" % str(qs))
 	new_run(0.1)
 	_check(day == 1 and phase == Phase.BRIEFING and credits == 0 and earned_today == 0 and delivered == 0,
 		"a new run starts at day 1 with an empty bank")
-	_check(specimens().size() == total, "the building is fully stocked (%d specimens)" % specimens().size())
+	_check(specimens().size() == 0 and active_floor == -1, "a new run starts with the elevator parked on the roof")
 	tick_run(0.2)
 	_check(phase == Phase.PLAYING and time_left == DAY_SECONDS, "after the briefing the clock starts at %s" % fmt_clock(DAY_SECONDS))
 	tick_run(10.0)
@@ -802,7 +1099,7 @@ func _selftest() -> void:
 	_check(credits == bank_before and t2 != null and not t2.is_queued_for_deletion(), "no payouts once the run is over")
 	request_restart.rpc_id(1)
 	await get_tree().physics_frame
-	_check(day == 1 and phase == Phase.BRIEFING and credits == 0 and specimens().size() == total,
+	_check(day == 1 and phase == Phase.BRIEFING and credits == 0 and specimens().size() == 0,
 		"the host can restart a finished run")
 	phase = Phase.PLAYING
 	earned_today = quota()
@@ -810,13 +1107,13 @@ func _selftest() -> void:
 	time_left = 0.1
 	tick_run(0.2)
 	_check(phase == Phase.SUMMARY and day == 1, "quota met: the day ends with a summary")
-	p.global_position = Vector3(0, Level.level_y(2) + 0.05, 0)   # the crew is still down in the building
+	p.global_position = Vector3(0, Floors.EXP_Y + 0.05, 0)   # the crew is still down in the building
 	p.charges = 0
 	tick_run(SUMMARY_SECONDS + 0.1)
 	_check(day == 2 and phase == Phase.BRIEFING and earned_today == 0 and quota() == QUOTAS[1],
 		"day 2 starts fresh with a bigger quota ($%d)" % quota())
 	_check(credits == 340, "the bank carries over between days")
-	_check(specimens().size() == total, "the building is restocked for the new day")
+	_check(specimens().size() == 0 and active_floor == -1, "the next day starts with the floors closed")
 	_check(Level.floor_of(p.global_position.y) == 0 and p.charges == p.max_charges(),
 		"the crew is back on the roof with full prods")
 	day = DAYS
@@ -908,18 +1205,26 @@ func _selftest() -> void:
 	_check(respawn_queue.size() == queued + 1, "a replacement Glimmer is queued")
 	_check(p.knock.length() > 1.0, "the blast throws nearby players back (knock %.1f)" % p.knock.length())
 	p.knock = Vector3.ZERO
-	var hs := specimen_spawner.spawn(["K5", "skitter", Vector3(0, Level.level_y(1) + 1.0, 3.0)]) as Specimen
+	_activate_floor(1)
 	await get_tree().physics_frame
-	hs.global_position = hs.home + Vector3(12, 0, 0)
-	_check(hs.homesick() and hs._wander_plan(0.1).x < 0.0, "a specimen far from its spawn spot walks back toward it")
+	var maze: Dictionary = floor_info.maze
+	var hs := specimen_spawner.spawn(["K5", "skitter", Floors.cell_center(Vector2i(1, 1), Floors.EXP_Y + 1.0)]) as Specimen
+	await get_tree().physics_frame
+	hs.global_position = Floors.cell_center(Vector2i(6, 6), Floors.EXP_Y + 1.0)
+	var here := Floors.cell_of(maze, hs.global_position)
+	var there := Floors.cell_of(maze, hs.home)
+	var plan := hs._wander_plan(0.1)
+	var next_cell := Floors.cell_of(maze, Floors.next_step(maze, hs.global_position, hs.home))
+	_check(hs.homesick() and plan.length() > 0.5 and Floors.path(maze, next_cell, there).size() < Floors.path(maze, here, there).size(),
+		"a specimen far from its spawn spot walks back along the maze route")
 	hs.global_position = hs.home + Vector3(3, 0, 0)
 	_check(not hs.homesick(), "close to home it wanders freely")
-	hs.global_position = Vector3(12, Level.level_y(2) + 1.0, 3)
-	_check(not hs.homesick(), "on a different floor from home it just wanders (no cross-floor pathing yet)")
+	hs.global_position = Vector3(12, 1.0, 3)
+	_check(not hs.homesick(), "on a different level from home (the roof) it just wanders")
 	hs.queue_free()
 	await get_tree().physics_frame
 	print("Glimmer blink:")
-	var spot: Vector3 = Level.spawn_points(3)[0]
+	var spot: Vector3 = floor_info.cells[0]
 	p.global_position = spot + Vector3(3, -0.8, 0)
 	var bl := specimen_spawner.spawn(["K7", "glimmer", spot]) as Specimen
 	await get_tree().physics_frame
@@ -964,7 +1269,7 @@ func _selftest() -> void:
 	new_run(0.1)
 	tick_run(0.2)
 	_check(upgrades.is_empty() and phase == Phase.PLAYING, "a new run starts with no upgrades")
-	p.global_position = Vector3(0, Level.level_y(1) + 0.05, 0)
+	p.global_position = Vector3(0, Floors.EXP_Y + 0.05, 0)
 	credits = 1000
 	request_buy.rpc_id(1, "coils")
 	_check(credits == 1000 and level_of("coils") == 0, "the store refuses you when you're down in the building")
@@ -1093,6 +1398,11 @@ func _shot_hud() -> void:
 	hud.open_shop()
 	await _wait(0.5)
 	get_viewport().get_texture().get_image().save_png("%s/store.png" % dir)
+	hud.close_shop()
+	p.global_position = Level.roof_cab.zone_c + Vector3(0, -0.95, 0)
+	hud.open_elevator()
+	await _wait(0.5)
+	get_viewport().get_texture().get_image().save_png("%s/elevator.png" % dir)
 	get_tree().quit(0)
 
 
@@ -1103,8 +1413,8 @@ func _shot() -> void:
 		dir = "user://"
 	var views := [
 		[Vector3(-2, 0.05, 2), atan2(-95.0, 70.0), -0.05],
-		[Vector3(-13, 0.05, -13), PI, -0.45],
-		[Vector3(-12, -5.95, 11), -PI / 2, -0.1],
+		[Vector3(2, 0.05, -4), -PI / 2, -0.1],     # facing the roof elevator
+		[Vector3(7.5, 0.05, 1.5), -PI / 2 - 0.9, -0.25],   # inside the cab, looking at its panel
 	]
 	var p := local_player()
 	var i := 0
@@ -1124,7 +1434,17 @@ func _shot() -> void:
 		await _wait(0.6)
 		get_viewport().get_texture().get_image().save_png("%s/shot%d.png" % [dir, i])
 		i += 1
-	for sp in ["skitter", "brute"]:
+	_activate_floor(2)   # floor 8: the biggest of the three in the design
+	await _wait(0.6)
+	var cell: Vector3 = floor_info.cells[floor_info.cells.size() / 2]
+	p.global_position = Vector3(Floors.CELL * 0.5, Floors.EXP_Y + 0.05, Floors.CELL * 0.5)
+	p.velocity = Vector3.ZERO
+	p.rotation.y = -PI / 2
+	p.head.rotation.x = -0.05
+	await _wait(0.8)
+	get_viewport().get_texture().get_image().save_png("%s/shot%d.png" % [dir, i])   # in the maze, by the elevator
+	i += 1
+	for sp in ["skitter", "brute", "glimmer"]:
 		for s in specimens():
 			if s.species == sp:
 				s.stun_left = 3.0
@@ -1135,4 +1455,5 @@ func _shot() -> void:
 		await _wait(0.6)
 		get_viewport().get_texture().get_image().save_png("%s/shot%d.png" % [dir, i])
 		i += 1
+	p.global_position = Vector3(cell.x, Floors.EXP_Y + 6.0, cell.z)
 	get_tree().quit(0)
