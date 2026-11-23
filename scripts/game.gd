@@ -36,6 +36,8 @@ var phase := Phase.BRIEFING
 var phase_t := 0.0        # seconds left in a BRIEFING or SUMMARY
 var time_left := 0.0      # seconds left on the day's clock
 var clock_sync_t := 0.0
+var upgrades := {}        # store upgrades, crew-wide: {"battery": 1, ...}
+var daylight_bought := 0  # Floodlights bought today
 var next_spec_id := 0
 var respawn_queue: Array = []   # [[seconds_left, species], ...] (server only)
 var test_mode := ""
@@ -88,7 +90,8 @@ func _make_spawner(n: String, path: String, fn: Callable) -> MultiplayerSpawner:
 
 func _setup_input() -> void:
 	var keys := {"fwd": KEY_W, "back": KEY_S, "left": KEY_A, "right": KEY_D,
-		"jump": KEY_SPACE, "sprint": KEY_SHIFT, "grab": KEY_E, "menu": KEY_ESCAPE, "restart": KEY_R}
+		"jump": KEY_SPACE, "sprint": KEY_SHIFT, "grab": KEY_E, "menu": KEY_ESCAPE, "restart": KEY_R,
+		"shop": KEY_B}
 	for action in keys:
 		if not InputMap.has_action(action):
 			InputMap.add_action(action)
@@ -252,7 +255,7 @@ func carry_speed_factor(id: int) -> float:
 	if s == null:
 		return 1.0
 	var m: float = s.spec.mass
-	return clampf(1.0 / (1.0 + m / (35.0 * s.held_by.size())), 0.35, 1.0)
+	return clampf(1.0 / (1.0 + m / (35.0 * s.held_by.size() * Shop.carry_strength(upgrades))), 0.35, 1.0)
 
 
 # --- Requests from clients (server decides) ----------------------------------
@@ -270,7 +273,7 @@ func request_stun(spec_name: String) -> void:
 	var p := get_player(_sender())
 	if s == null or p == null or p.global_position.distance_to(s.global_position) > 5.0:
 		return
-	s.stun_left = float(s.spec.stun)
+	s.stun_left = float(s.spec.stun) * Shop.stun_mult(upgrades)
 
 
 @rpc("any_peer", "call_local", "reliable")
@@ -324,6 +327,7 @@ func new_run(briefing := BRIEFING_SECONDS) -> void:
 	day = 1
 	credits = 0
 	delivered = 0
+	upgrades = {}
 	_begin_day(briefing)
 
 
@@ -333,6 +337,7 @@ func _begin_day(briefing: float) -> void:
 	phase_t = briefing
 	time_left = DAY_SECONDS
 	earned_today = 0
+	daylight_bought = 0
 	for s in specimens():
 		s.queue_free()
 	respawn_queue.clear()
@@ -353,7 +358,8 @@ func reset_players() -> void:
 
 func _state_dict() -> Dictionary:
 	return {"day": day, "phase": int(phase), "phase_t": phase_t, "time_left": time_left,
-		"earned": earned_today, "bank": credits, "delivered": delivered}
+		"earned": earned_today, "bank": credits, "delivered": delivered,
+		"upgrades": upgrades, "daylight": daylight_bought}
 
 
 @rpc("authority", "call_local", "reliable")
@@ -365,6 +371,8 @@ func set_run_state(st: Dictionary, msg: String) -> void:
 	earned_today = st.earned
 	credits = st.bank
 	delivered = st.delivered
+	upgrades = st.upgrades.duplicate()
+	daylight_bought = st.daylight
 	hud.run_changed(msg)
 
 
@@ -411,6 +419,77 @@ func _end_day() -> void:
 		phase = Phase.SUMMARY
 		phase_t = SUMMARY_SECONDS
 		_broadcast("Day %d complete. Quota met." % day)
+
+
+# --- The store ---------------------------------------------------------------
+
+func level_of(id: String) -> int:
+	return daylight_bought if id == "daylight" else Shop.level_of(upgrades, id)
+
+
+## Why `id` can't be bought right now ("" means it can). Shared by the server's
+## check and the buttons in the store, so they always agree.
+func buy_problem(id: String) -> String:
+	if phase == Phase.WON or phase == Phase.LOST:
+		return "The run is over."
+	var lvl := level_of(id)
+	if lvl >= Shop.max_level(id):
+		return "%s: already maxed out." % Shop.ITEMS[id].title
+	if id == "daylight" and phase != Phase.PLAYING:
+		return "Floodlights only help while the clock is running."
+	var price := Shop.cost(id, lvl)
+	if credits < price:
+		return "Not enough in the bank: %s costs $%d." % [Shop.ITEMS[id].title, price]
+	return ""
+
+
+@rpc("any_peer", "call_local", "reliable")
+func request_buy(id: String) -> void:
+	if not multiplayer.is_server() or not Shop.ITEMS.has(id):
+		return
+	var buyer := _sender()
+	var p := get_player(buyer)
+	var problem := ""
+	if p == null or Level.floor_of(p.global_position.y) != 0:
+		problem = "The store is on the roof."
+	else:
+		problem = buy_problem(id)
+	if problem != "":
+		notify.rpc_id(buyer, problem)
+		return
+	var lvl := level_of(id)
+	credits -= Shop.cost(id, lvl)
+	if id == "daylight":
+		daylight_bought += 1
+		time_left += Shop.DAYLIGHT_SECONDS
+	else:
+		upgrades[id] = lvl + 1
+	_broadcast("%s bought %s%s." % [p.tag.text, Shop.ITEMS[id].title, "" if id == "daylight" else " (level %d)" % (lvl + 1)])
+
+
+## A private message for one player (like a refused purchase).
+@rpc("authority", "call_local", "reliable")
+func notify(msg: String) -> void:
+	hud.toast(msg)
+
+
+func toggle_shop() -> void:
+	if hud.shop_open:
+		close_shop()
+		return
+	var p := local_player()
+	if p == null or Level.floor_of(p.global_position.y) != 0:
+		hud.toast("The store is up on the roof. Bring your catch up first.")
+		return
+	if phase == Phase.WON or phase == Phase.LOST:
+		return
+	hud.open_shop()
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+
+
+func close_shop() -> void:
+	hud.close_shop()
+	capture_mouse()
 
 
 @rpc("any_peer", "call_local", "reliable")
@@ -516,6 +595,10 @@ func _autotest_host() -> void:
 	while credits <= 0:
 		await get_tree().physics_frame
 	print("[host] delivered, credits = %d" % credits)
+	await _wait(1.0)
+	credits = 500
+	request_buy.rpc_id(1, "battery")   # the host buys from the roof; the client must see it
+	print("[host] bought a Prod Battery, bank = %d" % credits)
 	await _wait(1.5)
 	print("AUTOTEST HOST: PASS")
 	get_tree().quit(0)
@@ -558,6 +641,13 @@ func _autotest_join() -> void:
 		get_tree().quit(1)
 		return
 	print("[join] run state synced: day %d of %d, quota $%d, earned today $%d" % [day, DAYS, quota(), earned_today])
+	while level_of("battery") < 1:
+		await get_tree().process_frame
+	if credits != 500 - Shop.cost("battery", 0):
+		print("AUTOTEST JOIN: FAIL (store purchase synced with the wrong bank: %d)" % credits)
+		get_tree().quit(1)
+		return
+	print("[join] store purchase synced: Prod Battery level %d, bank $%d" % [level_of("battery"), credits])
 	print("AUTOTEST JOIN: PASS")
 	get_tree().quit(0)
 
@@ -664,7 +754,7 @@ func _selftest() -> void:
 		"day 2 starts fresh with a bigger quota ($%d)" % quota())
 	_check(credits == 340, "the bank carries over between days")
 	_check(specimens().size() == total, "the building is restocked for the new day")
-	_check(Level.floor_of(p.global_position.y) == 0 and p.charges == Player.MAX_CHARGES,
+	_check(Level.floor_of(p.global_position.y) == 0 and p.charges == p.max_charges(),
 		"the crew is back on the roof with full prods")
 	day = DAYS
 	phase = Phase.PLAYING
@@ -674,6 +764,79 @@ func _selftest() -> void:
 	_check(phase == Phase.WON, "meeting the final quota wins the run")
 	net_clock(5.0, 77.0)
 	_check(phase_t == 5.0 and time_left == 77.0, "clock corrections from the host are applied")
+	print("Store:")
+	var sane := Shop.ORDER.size() == Shop.ITEMS.size()
+	for id in Shop.ORDER:
+		var prev := 0
+		for c in Shop.ITEMS[id].costs:
+			if c <= 0 or c < prev:
+				sane = false
+			prev = c
+	_check(sane, "every store item has positive, non-decreasing prices")
+	new_run(0.1)
+	tick_run(0.2)
+	_check(upgrades.is_empty() and phase == Phase.PLAYING, "a new run starts with no upgrades")
+	p.global_position = Vector3(0, Level.level_y(1) + 0.05, 0)
+	credits = 1000
+	request_buy.rpc_id(1, "coils")
+	_check(credits == 1000 and level_of("coils") == 0, "the store refuses you when you're down in the building")
+	p.global_position = roof_spawn(1)
+	request_buy.rpc_id(1, "battery")
+	_check(credits == 1000 - Shop.cost("battery", 0) and level_of("battery") == 1, "buying a Prod Battery costs $%d" % Shop.cost("battery", 0))
+	_check(p.max_charges() == Player.MAX_CHARGES + 2, "it adds 2 prod charges (now %d)" % p.max_charges())
+	credits = 100
+	request_buy.rpc_id(1, "battery")
+	_check(credits == 100 and level_of("battery") == 1, "you can't buy what you can't afford")
+	credits = 5000
+	request_buy.rpc_id(1, "battery")
+	request_buy.rpc_id(1, "battery")
+	var bank_at_max := credits
+	request_buy.rpc_id(1, "battery")
+	_check(level_of("battery") == Shop.max_level("battery") and credits == bank_at_max, "upgrades stop at their maximum level")
+	_check(buy_problem("battery") != "" and buy_problem("harness") == "", "the store buttons use the same rule as the host")
+	request_buy.rpc_id(1, "coils")
+	var rock := specimen_spawner.spawn(["T3", "skitter", p.get_hold_point()]) as Specimen
+	await get_tree().physics_frame
+	request_stun.rpc_id(1, "T3")
+	_check(is_equal_approx(rock.stun_left, float(Specimen.SPECIES.skitter.stun) * 1.3), "Stun Coils lengthen the stun (%.1fs instead of %.1fs)" % [
+		rock.stun_left, float(Specimen.SPECIES.skitter.stun)])
+	rock.queue_free()
+	var heavy := specimen_spawner.spawn(["T4", "brute", p.get_hold_point()]) as Specimen
+	await get_tree().physics_frame
+	heavy.held_by = PackedInt32Array([1])
+	var slow := carry_speed_factor(1)
+	request_buy.rpc_id(1, "harness")
+	request_buy.rpc_id(1, "harness")
+	_check(carry_speed_factor(1) > slow, "the Carry Harness makes a Brute easier to haul (speed x%.2f -> x%.2f)" % [slow, carry_speed_factor(1)])
+	heavy.queue_free()
+	_check(is_equal_approx(Shop.sprint_mult({"boots": 1}), 1.12), "Sprint Boots add 12% per level")
+	p.charges = 0
+	var battery_level := level_of("battery")
+	earned_today = quota()
+	time_left = 0.1
+	tick_run(0.2)
+	tick_run(SUMMARY_SECONDS + 0.1)
+	_check(day == 2 and level_of("battery") == battery_level and p.charges == p.max_charges(),
+		"upgrades carry into the next day and the prod comes back fully charged (%d)" % p.max_charges())
+	credits = 1000
+	request_buy.rpc_id(1, "daylight")
+	_check(daylight_bought == 0 and credits == 1000, "Floodlights can't be bought while the clock isn't running")
+	tick_run(BRIEFING_SECONDS + 0.1)
+	var clock_before := time_left
+	request_buy.rpc_id(1, "daylight")
+	_check(is_equal_approx(time_left, clock_before + Shop.DAYLIGHT_SECONDS) and daylight_bought == 1,
+		"Floodlights add %d seconds to the clock" % int(Shop.DAYLIGHT_SECONDS))
+	request_buy.rpc_id(1, "daylight")
+	var capped := credits
+	request_buy.rpc_id(1, "daylight")
+	_check(daylight_bought == 2 and credits == capped, "Floodlights are limited to twice a day")
+	earned_today = quota()
+	time_left = 0.1
+	tick_run(0.2)
+	tick_run(SUMMARY_SECONDS + 0.1)
+	_check(day == 3 and daylight_bought == 0, "the daily Floodlight limit resets each day")
+	new_run()
+	_check(upgrades.is_empty(), "a new run clears every upgrade")
 	print("Intro cinematic:")
 	var intro := play_intro()
 	var crater := get_tree().get_nodes_in_group("crater")
@@ -723,6 +886,7 @@ func _shot_hud() -> void:
 		["hud5", Phase.WON, {"day": 4, "earned": 1040, "credits": 1500, "phase_t": 0.0, "time_left": 0.0}],
 	]
 	for st in states:
+		hud.close_shop()
 		phase = st[1]
 		day = st[2].day
 		earned_today = st[2].earned
@@ -731,6 +895,16 @@ func _shot_hud() -> void:
 		time_left = st[2].time_left
 		await _wait(0.5)
 		get_viewport().get_texture().get_image().save_png("%s/%s.png" % [dir, st[0]])
+	phase = Phase.PLAYING
+	day = 2
+	earned_today = 210
+	credits = 400
+	time_left = 120.0
+	upgrades = {"battery": 1, "boots": 2}
+	daylight_bought = 1
+	hud.open_shop()
+	await _wait(0.5)
+	get_viewport().get_texture().get_image().save_png("%s/store.png" % dir)
 	get_tree().quit(0)
 
 

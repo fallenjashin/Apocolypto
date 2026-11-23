@@ -20,6 +20,10 @@ var bottom_lbl: Label
 var flash_rect: ColorRect
 var dim_rect: ColorRect
 var banner_lbl: Label
+var shop_root: Control
+var shop_list: VBoxContainer
+var shop_bank_lbl: Label
+var shop_open := false
 
 
 func _ready() -> void:
@@ -70,7 +74,93 @@ func _ready() -> void:
 	help.anchor_bottom = 1.0
 	help.offset_left = -330
 	help.offset_top = -120
-	help.text = "WASD move  ·  Shift sprint  ·  Space jump\nLeft click: stun prod\nHold E: grab / carry\nEsc: free the mouse"
+	help.text = "WASD move  ·  Shift sprint  ·  Space jump\nLeft click: stun prod\nHold E: grab / carry\nB (on the roof): military store\nEsc: free the mouse"
+	help.offset_top = -140
+	_build_shop()
+
+
+func _build_shop() -> void:
+	shop_root = CenterContainer.new()
+	shop_root.set_anchors_preset(Control.PRESET_FULL_RECT)
+	shop_root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	shop_root.visible = false
+	add_child(shop_root)
+	var panel := PanelContainer.new()
+	shop_root.add_child(panel)
+	var margin := MarginContainer.new()
+	for side in ["left", "right", "top", "bottom"]:
+		margin.add_theme_constant_override("margin_" + side, 22)
+	panel.add_child(margin)
+	var v := VBoxContainer.new()
+	v.add_theme_constant_override("separation", 10)
+	margin.add_child(v)
+	var title := Label.new()
+	title.text = "MILITARY STORE"
+	title.add_theme_font_size_override("font_size", 34)
+	v.add_child(title)
+	shop_bank_lbl = Label.new()
+	shop_bank_lbl.add_theme_font_size_override("font_size", 22)
+	v.add_child(shop_bank_lbl)
+	shop_list = VBoxContainer.new()
+	shop_list.add_theme_constant_override("separation", 8)
+	v.add_child(shop_list)
+	var foot := Label.new()
+	foot.text = "Upgrades are shared by the whole crew and last the whole run.   B or Esc to close."
+	foot.add_theme_font_size_override("font_size", 14)
+	foot.modulate = Color(1, 1, 1, 0.7)
+	v.add_child(foot)
+
+
+func open_shop() -> void:
+	shop_open = true
+	shop_root.visible = true
+	refresh_shop()
+
+
+func close_shop() -> void:
+	shop_open = false
+	shop_root.visible = false
+
+
+## Rebuilds the rows. The buttons use the same rule the host uses to accept a purchase.
+func refresh_shop() -> void:
+	shop_bank_lbl.text = "Bank: $%d" % game.credits
+	for c in shop_list.get_children():
+		shop_list.remove_child(c)
+		c.queue_free()
+	for id in Shop.ORDER:
+		var item: Dictionary = Shop.ITEMS[id]
+		var lvl := game.level_of(id)
+		var maxed := lvl >= Shop.max_level(id)
+		var row := HBoxContainer.new()
+		row.add_theme_constant_override("separation", 18)
+		var info := VBoxContainer.new()
+		info.custom_minimum_size.x = 420
+		var name_lbl := Label.new()
+		var tag := "  (bought today: %d / %d)" % [lvl, Shop.max_level(id)] if id == "daylight" \
+			else "  Lv %d / %d" % [lvl, Shop.max_level(id)]
+		name_lbl.text = item.title + tag
+		name_lbl.add_theme_font_size_override("font_size", 20)
+		info.add_child(name_lbl)
+		var desc := Label.new()
+		desc.text = item.desc
+		desc.add_theme_font_size_override("font_size", 14)
+		desc.modulate = Color(1, 1, 1, 0.7)
+		info.add_child(desc)
+		row.add_child(info)
+		var btn := Button.new()
+		btn.custom_minimum_size = Vector2(130, 40)
+		if maxed:
+			btn.text = "MAX"
+			btn.disabled = true
+		else:
+			btn.text = "Buy  $%d" % Shop.cost(id, lvl)
+			var problem := game.buy_problem(id)
+			btn.disabled = problem != ""
+			btn.tooltip_text = problem
+			btn.pressed.connect(func(): game.request_buy.rpc_id(1, id))
+		row.add_child(btn)
+		shop_list.add_child(row)
 
 
 func _label(size: int, centered := false) -> Label:
@@ -108,7 +198,7 @@ func _build_menu() -> Control:
 	title.add_theme_font_size_override("font_size", 48)
 	v.add_child(title)
 	var sub := Label.new()
-	sub.text = "Prototype 1: capture & haul  ·  build 5"
+	sub.text = "Prototype 1: capture & haul  ·  build 6"
 	v.add_child(sub)
 	var desc := Label.new()
 	desc.autowrap_mode = TextServer.AUTOWRAP_WORD
@@ -176,6 +266,11 @@ func zap() -> void:
 ## Called whenever the server sends a new run state. The numbers themselves are drawn every frame.
 func run_changed(msg: String) -> void:
 	toast(msg)
+	if shop_open:
+		if game.phase == Game.Phase.WON or game.phase == Game.Phase.LOST:
+			game.close_shop()
+		else:
+			refresh_shop()
 
 
 func _top_text() -> String:
@@ -229,10 +324,11 @@ func _process(delta: float) -> void:
 	var p := game.local_player()
 	if p == null:
 		return
-	var bar := "#".repeat(p.charges) + "-".repeat(Player.MAX_CHARGES - p.charges)
+	var bar := "#".repeat(p.charges) + "-".repeat(maxi(0, p.max_charges() - p.charges))
 	var where := Level.floor_of(p.global_position.y)
-	var recharge := "  (recharging)" if where == 0 and p.charges < Player.MAX_CHARGES else ""
-	bottom_lbl.text = "%s\nProd charges [%s]%s" % [Game.DEPTH_NAMES[where], bar, recharge]
+	var recharge := "  (recharging)" if where == 0 and p.charges < p.max_charges() else ""
+	var store_hint := "\nPress B to open the store" if where == 0 and not shop_open else ""
+	bottom_lbl.text = "%s\nProd charges [%s]%s%s" % [Game.DEPTH_NAMES[where], bar, recharge, store_hint]
 	var held := game.held_spec_of(p.peer_id)
 	if held:
 		var n := held.held_by.size()

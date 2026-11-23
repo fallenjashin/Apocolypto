@@ -19,9 +19,10 @@ Everything is gray boxes on purpose. Don't add art until that answer is yes.
 | Input | Action |
 |---|---|
 | WASD / Shift / Space | Move / sprint / jump |
-| Left click | Stun prod (6 charges, they recharge on the roof) |
+| Left click | Stun prod (6 charges, more with Prod Batteries; they recharge on the roof) |
 | Hold E | Grab and carry |
 | Esc | Free the mouse (click to recapture) |
+| B | Open the military store (on the roof only) |
 | R | Host only: start a new run after winning or losing |
 
 ## The run
@@ -32,7 +33,7 @@ A run is **4 days**. Each day has a **5-minute clock** and a **quota** you must 
 |---|---|---|---|---|
 | Quota | $300 | $500 | $750 | $1,000 |
 
-- **Earned today** counts toward the quota and resets every day. The **bank** keeps everything you've ever earned (it's what the store will spend).
+- **Earned today** counts toward the quota and resets every day. The **bank** keeps everything you've ever earned (it's what the store spends).
   Earn more than the quota and the surplus stays in the bank.
 - Miss the quota by even $1 when the clock hits zero and the run ends: **OVERRUN**.
 - Make it and you get a **day summary** (12 seconds), then the next day starts: the building is restocked and the crew is back on the roof with full prods.
@@ -40,6 +41,21 @@ A run is **4 days**. Each day has a **5-minute clock** and a **quota** you must 
 - The host's computer owns the clock; everyone else counts down locally and is corrected twice a second.
 - Day 1 starts with a 16-second wait so the opening cinematic can play. Later days start after 6 seconds.
 - All the numbers (`QUOTAS`, `DAY_SECONDS`, and so on) are at the top of `scripts/game.gd`. They're a first guess. Tune them after playtests.
+
+## The military store
+
+Press **B** on the roof to open it. Purchases come out of the shared bank (never out of "earned today", so shopping can't make you miss a quota).
+Upgrades are crew-wide and last the whole run. The host validates every purchase: you must be on the roof, the run must be live, and the bank must cover it.
+
+| Item | Effect | Price per level |
+|---|---|---|
+| Prod Battery (3) | +2 prod charges | $120 / $220 / $350 |
+| Stun Coils (3) | Stuns last 30% longer | $150 / $250 / $400 |
+| Carry Harness (2) | Heavy loads slow you down much less | $180 / $320 |
+| Sprint Boots (2) | Sprint 12% faster | $100 / $200 |
+| Floodlights | +45 s on today's clock, twice a day | $120 each |
+
+Prices and strengths live in `scripts/shop.gd`. They're a first guess. Tune them after playtests.
 
 ## The rules being tested
 
@@ -94,9 +110,8 @@ Clients send requests and the host validates them (for example, it checks that y
 
 ## Not in yet (next steps, in order)
 
-1. **The military store:** spend the bank on upgrades.
-2. Steam lobbies and invites (GodotSteam) instead of IP + port.
-3. Proximity voice chat.
-4. Random floor layouts, so runs don't repeat.
-5. The infestation climbing the floors, and the rooftop last stand.
-6. Real art, only after the rest feels good.
+1. Steam lobbies and invites (GodotSteam) instead of IP + port.
+2. Proximity voice chat.
+3. Random floor layouts, so runs don't repeat.
+4. The infestation climbing the floors, and the rooftop last stand.
+5. Real art, only after the rest feels good.

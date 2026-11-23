@@ -105,9 +105,13 @@ func _ready() -> void:
 func reset_for_day() -> void:
 	global_position = game.roof_spawn(peer_id)
 	velocity = Vector3.ZERO
-	charges = MAX_CHARGES
+	charges = max_charges()
 	prod_cd = 0.0
 	grabbing = ""
+
+
+func max_charges() -> int:
+	return Shop.max_charges(game.upgrades)
 
 
 func get_hold_point() -> Vector3:
@@ -122,8 +126,15 @@ func _unhandled_input(event: InputEvent) -> void:
 		rotate_y(-mm.relative.x * MOUSE_SENS)
 		head.rotation.x = clampf(head.rotation.x - mm.relative.y * MOUSE_SENS, -1.45, 1.45)
 	elif event.is_action_pressed("menu"):
-		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+		if game.hud.shop_open:
+			game.close_shop()
+		else:
+			Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	elif event.is_action_pressed("shop"):
+		game.toggle_shop()
 	elif event.is_action_pressed("prod"):
+		if game.hud.shop_open:
+			return   # clicking the world shouldn't close the store by accident
 		if Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
 			game.capture_mouse()
 		else:
@@ -143,14 +154,15 @@ func _physics_process(delta: float) -> void:
 		if Input.is_action_just_pressed("jump") and is_on_floor():
 			velocity.y = JUMP_V
 	var dir := (transform.basis * Vector3(input.x, 0, input.y)).normalized()
-	var speed := (SPRINT if can_move and Input.is_action_pressed("sprint") else WALK) * game.carry_speed_factor(peer_id)
+	var sprint_speed := SPRINT * Shop.sprint_mult(game.upgrades)
+	var speed := (sprint_speed if can_move and Input.is_action_pressed("sprint") else WALK) * game.carry_speed_factor(peer_id)
 	var k := minf(1.0, ACCEL * delta)
 	velocity.x = lerpf(velocity.x, dir.x * speed, k)
 	velocity.z = lerpf(velocity.z, dir.z * speed, k)
 	move_and_slide()
 
 	prod_cd = maxf(0.0, prod_cd - delta)
-	if Level.floor_of(global_position.y) == 0 and charges < MAX_CHARGES:
+	if Level.floor_of(global_position.y) == 0 and charges < max_charges():
 		recharge_t += delta
 		if recharge_t >= RECHARGE_TIME:
 			recharge_t = 0.0
