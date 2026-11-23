@@ -13,14 +13,24 @@ const SPECIES := {
 		"speed": 2.5, "stun": 9.0, "struggle": 1700.0, "value": 150, "temper": "territorial"},
 	"glimmer": {"label": "Glimmer", "color": Color(0.5, 0.6, 1.0), "size": 0.5, "mass": 10.0,
 		"speed": 10.0, "stun": 3.5, "struggle": 1500.0, "value": 350, "temper": "shy", "volatile": true, "blinker": true},
+	# Not loot: a hunter that stalks the crew. It can be stunned but never captured or sold.
+	"stalker": {"label": "Stalker", "color": Color(0.16, 0.1, 0.2), "size": 1.1, "mass": 60.0,
+		"speed": 5.4, "stun": 4.0, "struggle": 0.0, "value": 0, "temper": "hunter", "hostile": true},
 }
 ## Each species has a temper: a rule that changes what the crew has to do.
 ## "hint" is shown on the crosshair readout so players can learn it.
 const TEMPERS := {
 	"skittish": {"name": "SKITTISH", "hint": "Lets one person walk up. Bolts from a group."},
 	"territorial": {"name": "TERRITORIAL", "hint": "Ignores you until stunned, then hunts whoever stunned it."},
+	"hunter": {"name": "HUNTER", "hint": "Hunts the crew and hits hard. A prod stuns it for 4 s. It can't be captured."},
 	"shy": {"name": "SHY", "hint": "Blinks away when you close in. 2+ watchers freeze it (no blinking). Blows up if it wakes un-stunned."},
 }
+const STALK_DAMAGE := 25.0    # four hits kill
+const STALK_REACH := 1.8
+const STALK_COOLDOWN := 1.2
+const HUNT_RANGE := 45.0
+const BRUTE_DAMAGE := 20.0
+const BOOM_DAMAGE := 35.0     # at point-blank range; falls off with distance
 const SKITTISH_ALONE := 4.5   # flee radius when only one player is near
 const SKITTISH_GROUP := 8.0   # flee radius (and speed-up) when two or more are near
 const SKITTISH_GROUP_SPEED := 1.4
@@ -55,6 +65,7 @@ var held_by := PackedInt32Array()
 var mood := 0               # synced tell: 0 calm, 1 enraged and hunting, 2 frozen by watchers
 var provoked_by := 0        # server only: who a Territorial specimen is hunting (0 = nobody)
 var charge_t := 0.0
+var attack_cd := 0.0        # server: a hunter's time until its next hit
 var blink_t := 0.0           # server: >0 while the warning flicker plays
 var blink_cd := 0.0
 var fuse_t := 0.0           # synced: >0 means about to explode (volatile species only)
@@ -162,6 +173,7 @@ func _explode() -> void:
 			away = Vector3(randf() - 0.5, 0, randf() - 0.5)
 		var falloff := 1.0 - clampf(d / BOOM_RADIUS, 0.0, 1.0) * 0.6
 		game.shove.rpc(p.peer_id, away.normalized() * BOOM_PUSH * falloff)
+		game.damage_player(p.peer_id, BOOM_DAMAGE * falloff, "an exploding Glimmer")
 	game.specimen_exploded(self)
 
 
@@ -197,7 +209,7 @@ func _server_tick(delta: float) -> void:
 	var kept := PackedInt32Array()
 	for id in held_by:
 		var p := game.get_player(id)
-		if p == null:
+		if p == null or game.is_dead(id):
 			continue
 		if global_position.distance_to(p.get_hold_point()) > BREAK_DIST:
 			continue  # slipped out of this holder's hands
@@ -236,6 +248,7 @@ func _ai(delta: float) -> void:
 		"skittish": plan = _plan_skittish()
 		"territorial": plan = _plan_territorial(delta)
 		"shy": plan = _plan_shy(delta)
+		"hunter": plan = _plan_hunter(delta)
 	var desired := plan if plan.x != INF else _wander_plan(delta)
 	var v := linear_velocity
 	v.y = 0.0
@@ -337,9 +350,59 @@ func _plan_territorial(delta: float) -> Vector3:
 	mood = 1
 	if to.length() < SLAM_DIST:
 		game.shove.rpc(provoked_by, to.normalized() * SLAM_PUSH)
+		game.damage_player(provoked_by, BRUTE_DAMAGE, "a Brute")
 		provoked_by = 0
 		return Vector3.ZERO
 	return to.normalized() * float(spec.speed) * CHARGE_SPEED
+
+
+## The nearest living player on this level who isn't hiding behind closed elevator doors.
+func _hunt_target() -> Player:
+	var best: Player = null
+	var best_d := HUNT_RANGE
+	for p in game.alive_players():
+		if Level.floor_of(p.global_position.y) != Level.floor_of(global_position.y):
+			continue
+		if game.doors[1] and Floors.in_zone(game.floor_info.get("cab", {}), p.global_position):
+			continue
+		var d := p.global_position.distance_to(global_position)
+		if d < best_d:
+			best_d = d
+			best = p
+	return best
+
+
+## Hunter: follows the maze route to the nearest exposed player and hits them. If everyone
+## left is shut in the elevator, it waits outside the doors (and the game lets it force them).
+func _plan_hunter(delta: float) -> Vector3:
+	attack_cd = maxf(0.0, attack_cd - delta)
+	var maze: Dictionary = game.floor_info.get("maze", {})
+	var goal := NO_PLAN
+	var target := _hunt_target()
+	if target != null:
+		goal = target.global_position
+		var to := goal - global_position
+		to.y = 0.0
+		mood = 1
+		if to.length() < STALK_REACH:
+			if attack_cd <= 0.0:
+				attack_cd = STALK_COOLDOWN
+				game.shove.rpc(target.peer_id, to.normalized() * 5.0)
+				game.damage_player(target.peer_id, STALK_DAMAGE, "a Stalker")
+			return Vector3.ZERO
+	elif game.doors[1] and not maze.is_empty():
+		goal = game.floor_info.cab.door.global_position + Vector3(2.0, 0.0, 0.0)
+		mood = 1
+	if goal.x == INF:
+		return NO_PLAN
+	var step := goal
+	if not maze.is_empty():
+		step = Floors.next_step(maze, global_position, goal)
+	var dir := step - global_position
+	dir.y = 0.0
+	if dir.length() < 0.5:
+		return Vector3.ZERO
+	return dir.normalized() * float(spec.speed)
 
 
 ## How many players have this specimen near the middle of their view.
@@ -419,7 +482,7 @@ func _update_visual() -> void:
 		var pulse := 0.5 + 0.5 * sin(Time.get_ticks_msec() * 0.015)
 		body_mat.emission = Color(1.0, 0.15, 0.1)
 		body_mat.emission_energy_multiplier = 0.8 + 1.2 * pulse
-		status = "ENRAGED!"
+		status = "HUNTING!" if bool(spec.get("hostile", false)) else "ENRAGED!"
 	elif mood == 2:
 		body_mat.emission = Color(1, 1, 1)
 		body_mat.emission_energy_multiplier = 0.9
@@ -432,4 +495,7 @@ func _update_visual() -> void:
 	if held_by.size() > 0:
 		status += "  [held x%d]" % held_by.size()
 	pivot.visible = not (mood == 3 and (Time.get_ticks_msec() / 40) % 2 == 0)   # flicker while about to blink
-	tag.text = "%s  $%d  [%s]\n%s" % [spec.label, spec.value, TEMPERS[spec.temper].name, status]
+	if bool(spec.get("hostile", false)):
+		tag.text = "%s  [%s]\n%s" % [spec.label, TEMPERS[spec.temper].name, status]
+	else:
+		tag.text = "%s  $%d  [%s]\n%s" % [spec.label, spec.value, TEMPERS[spec.temper].name, status]

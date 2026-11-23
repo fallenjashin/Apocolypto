@@ -18,6 +18,8 @@ var zap_t := 0.0
 var target_lbl: Label
 var bottom_lbl: Label
 var flash_rect: ColorRect
+var hurt_rect: ColorRect
+var death_lbl: Label
 var dim_rect: ColorRect
 var banner_lbl: Label
 var shop_root: Control
@@ -38,6 +40,11 @@ func _ready() -> void:
 	flash_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	flash_rect.color = Color(1.0, 0.92, 0.75, 0.0)
 	add_child(flash_rect)
+	hurt_rect = ColorRect.new()
+	hurt_rect.set_anchors_preset(Control.PRESET_FULL_RECT)
+	hurt_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	hurt_rect.color = Color(0.8, 0.0, 0.0, 0.0)
+	add_child(hurt_rect)
 	game_ui = Control.new()
 	game_ui.set_anchors_preset(Control.PRESET_FULL_RECT)
 	game_ui.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -48,6 +55,12 @@ func _ready() -> void:
 	dim_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	dim_rect.color = Color(0, 0, 0, 0.0)
 	game_ui.add_child(dim_rect)
+	death_lbl = _label(44, true)
+	death_lbl.anchor_top = 0.5
+	death_lbl.anchor_bottom = 0.5
+	death_lbl.offset_top = -80
+	death_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	death_lbl.modulate = Color(1.0, 0.4, 0.4)
 	banner_lbl = _label(40, true)
 	banner_lbl.anchor_top = 0.0
 	banner_lbl.offset_top = 150
@@ -70,7 +83,7 @@ func _ready() -> void:
 	bottom_lbl.anchor_top = 1.0
 	bottom_lbl.anchor_bottom = 1.0
 	bottom_lbl.offset_left = 16
-	bottom_lbl.offset_top = -120
+	bottom_lbl.offset_top = -150
 	var help := _label(16)
 	help.anchor_left = 1.0
 	help.anchor_right = 1.0
@@ -296,7 +309,7 @@ func _build_menu() -> Control:
 	title.add_theme_font_size_override("font_size", 48)
 	v.add_child(title)
 	var sub := Label.new()
-	sub.text = "Prototype 1: capture & haul  ·  build 10"
+	sub.text = "Prototype 1: capture & haul  ·  build 11"
 	v.add_child(sub)
 	var desc := Label.new()
 	desc.autowrap_mode = TextServer.AUTOWRAP_WORD
@@ -357,6 +370,11 @@ func flash_screen() -> void:
 	flash_rect.color.a = 0.85
 
 
+## The red flash when you take damage (or die).
+func hurt() -> void:
+	hurt_rect.color.a = 0.5
+
+
 func zap() -> void:
 	zap_t = 0.15
 
@@ -382,8 +400,10 @@ func _top_text() -> String:
 		Game.Phase.SUMMARY: clock = "day over"
 		_: clock = "run over"
 	var met := "   QUOTA MET" if g.earned_today >= g.quota() else ""
-	return "DAY %d / %d   ·   %s\nQuota today: $%d / $%d%s\nBank: $%d   ·   Delivered: %d" % [
-		g.day, Game.DAYS, clock, g.earned_today, g.quota(), met, g.credits, g.delivered]
+	var crew := g.players_root.get_child_count()
+	var alive := g.alive_players().size()
+	return "DAY %d / %d   ·   %s\nQuota today: $%d / $%d%s\nBank: $%d   ·   Delivered: %d   ·   Crew alive: %d/%d" % [
+		g.day, Game.DAYS, clock, g.earned_today, g.quota(), met, g.credits, g.delivered, alive, crew]
 
 
 func _banner_text() -> String:
@@ -396,13 +416,13 @@ func _banner_text() -> String:
 			return "DAY %d  ·  QUOTA $%d\nThe clock starts in %d" % [g.day, g.quota(), ceili(g.phase_t)]
 		Game.Phase.SUMMARY:
 			return "DAY %d COMPLETE\nEarned $%d  (quota $%d)\nBank: $%d  ·  Day %d starts in %d" % [
-				g.day, g.earned_today, g.quota(), g.credits, g.day + 1, ceili(g.phase_t)]
+				g.day, g.earned_today, g.quota(), g.credits, g.day + 1, ceili(g.phase_t)] + ("\n" + g.day_note if g.day_note != "" else "")
 		Game.Phase.WON:
-			return "YOU MADE IT\nAll %d quotas met. %d specimens delivered.\nBank: $%d\n%s" % [
-				Game.DAYS, g.delivered, g.credits, host_hint]
+			return "YOU MADE IT\nAll %d quotas met. %d specimens delivered.\nBank: $%d\n%s%s" % [
+				Game.DAYS, g.delivered, g.credits, g.day_note + "\n" if g.day_note != "" else "", host_hint]
 		Game.Phase.LOST:
-			return "OVERRUN  ·  DAY %d\nYou earned $%d of the $%d quota.\n%d specimens delivered.\n%s" % [
-				g.day, g.earned_today, g.quota(), g.delivered, host_hint]
+			return "RUN OVER  ·  DAY %d\n%s\n%d specimens delivered.\n%s" % [
+				g.day, g.lost_reason, g.delivered, host_hint]
 	return ""
 
 
@@ -411,6 +431,7 @@ func _process(delta: float) -> void:
 	toast_lbl.modulate.a = clampf(toast_t, 0.0, 1.0)
 	zap_t = maxf(0.0, zap_t - delta)
 	flash_rect.color.a = maxf(0.0, flash_rect.color.a - delta * 0.6)
+	hurt_rect.color.a = maxf(0.0, hurt_rect.color.a - delta * 1.2)
 	cross_lbl.modulate = Color(0.5, 0.8, 1.0) if zap_t > 0.0 else Color.WHITE
 	if not game_ui.visible or game == null:
 		return
@@ -424,13 +445,17 @@ func _process(delta: float) -> void:
 	var p := game.local_player()
 	if p == null:
 		return
+	var is_dead := game.is_dead(p.peer_id)
+	death_lbl.text = "YOU DIED\nIf anyone gets back to the roof by midnight the day still counts.\nYou're back tomorrow." if is_dead and game.phase == Game.Phase.PLAYING else ""
+	var hp_now := game.hp_of(p.peer_id)
+	var hp_bar := "#".repeat(ceili(hp_now / 10.0)) + "-".repeat(10 - ceili(hp_now / 10.0))
 	var bar := "#".repeat(p.charges) + "-".repeat(maxi(0, p.max_charges() - p.charges))
 	var where := Level.floor_of(p.global_position.y)
 	var recharge := "  (recharging)" if where == 0 and p.charges < p.max_charges() else ""
 	var store_hint := "\nPress B to open the store" if where == 0 and not shop_open else ""
 	if game.cab_of(p.global_position) >= 0 and not elevator_open:
 		store_hint += "\nPress E to use the elevator"
-	bottom_lbl.text = "%s\nProd charges [%s]%s%s" % [game.location_name(p), bar, recharge, store_hint]
+	bottom_lbl.text = "%s\nHealth [%s] %d\nProd charges [%s]%s%s" % [game.location_name(p), hp_bar, ceili(hp_now), bar, recharge, store_hint]
 	var held := game.held_spec_of(p.peer_id)
 	if held:
 		var n := held.held_by.size()
@@ -447,6 +472,11 @@ func _process(delta: float) -> void:
 	var t := p.look_target(Player.GRAB_RANGE + 1.0)
 	if t == null:
 		target_lbl.text = ""
+	elif bool(t.spec.get("hostile", false)):
+		if t.is_stunned():
+			target_lbl.text = "STALKER  STUNNED %.1fs. Get away or get to the elevator!" % t.stun_left
+		else:
+			target_lbl.text = "STALKER  hunts you, hits hard\nLeft click to stun it for a few seconds. It can't be captured."
 	elif t.is_stunned():
 		target_lbl.text = "%s  $%d  STUNNED %.1fs. Hold right click to grab" % [t.spec.label, t.spec.value, t.stun_left]
 	elif t.fuse_t > 0.0:

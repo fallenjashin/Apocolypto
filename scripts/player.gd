@@ -94,6 +94,14 @@ func setup(id: int, g: Game) -> void:
 	set_multiplayer_authority(id)
 
 
+func _process(_delta: float) -> void:
+	var alive := not game.is_dead(peer_id)
+	if not is_multiplayer_authority():
+		body_mesh.visible = alive
+		visor.visible = alive
+		tag.visible = alive
+
+
 func _ready() -> void:
 	var mine := is_multiplayer_authority()
 	cam.current = mine
@@ -156,7 +164,7 @@ func _physics_process(delta: float) -> void:
 		return
 	if not is_on_floor():
 		velocity.y -= GRAVITY * delta
-	var can_move := game.in_game and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED
+	var can_move := game.in_game and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED and not game.is_dead(peer_id)
 	var input := Vector2.ZERO
 	if can_move:
 		input = Input.get_vector("left", "right", "fwd", "back")
@@ -187,6 +195,8 @@ func _physics_process(delta: float) -> void:
 
 
 func try_prod() -> void:
+	if game.is_dead(peer_id):
+		return
 	if charges <= 0:
 		game.hud.toast("Prod is empty - recharge it on the roof")
 		return
@@ -201,6 +211,8 @@ func try_prod() -> void:
 
 
 func try_grab() -> void:
+	if game.is_dead(peer_id):
+		return
 	var t := look_target(GRAB_RANGE)
 	if t:
 		grabbing = String(t.name)

@@ -15,6 +15,13 @@ const RESPAWN_DELAY := 20.0
 const DAYS := 4
 const QUOTAS := [300, 500, 750, 1000]
 const DAY_SECONDS := 480.0   # one day, dawn (6 AM) to midnight, in real seconds
+const MAX_HP := 100.0
+const DEATH_CUT := 0.20          # each death costs this share of the bank at the end of the day
+const ROOF_HEAL := 8.0           # health per second while on the roof
+const CAB_HEAL := 4.0            # ...and while shut in an elevator
+const DOOR_FORCE_SECONDS := 6.0  # a hunter pounding on closed doors this long tears them open
+const DOOR_LOCK_SECONDS := 5.0   # after that the doors are jammed open for this long
+const STALKER_INTERVAL := 4.0
 const BRIEFING_SECONDS := 6.0
 const FIRST_BRIEFING_SECONDS := 16.0   # day 1 waits for the opening cinematic
 const SUMMARY_SECONDS := 12.0
@@ -44,6 +51,14 @@ var floor_seed := 0
 var floor_info := {}          # what Floors.build returned for the active floor
 var floor_runs := 0           # how many floors have been opened (makes each maze different)
 var doors := [false, false]   # elevator doors closed? [roof, floor]
+var hp := {}                  # peer id -> health. The host is the truth; others get copies
+var dead := {}                # peer id -> true once killed (until the next day)
+var deaths_today := 0         # host only
+var door_lock := 0.0          # host only
+var door_bash := 0.0          # host only
+var stalker_t := 0.0          # host only
+var lost_reason := ""         # why the run ended (shown on the loss screen)
+var day_note := ""            # extra line for the day summary (deaths and the bank cut)
 var test_mode := ""
 var test_failures := 0
 
@@ -204,7 +219,7 @@ func _spawn_specimen_node(data: Variant) -> Node:
 
 ## Server only. Puts one specimen on the active floor, on a random open cell away from
 ## the crew. Does nothing when no floor is open.
-func spawn_specimen(sp: String) -> void:
+func spawn_specimen(sp: String, min_player_dist := 12.0) -> void:
 	if active_floor < 0 or floor_info.is_empty():
 		return
 	var cells: Array = floor_info.cells
@@ -215,7 +230,7 @@ func spawn_specimen(sp: String) -> void:
 			if s.global_position.distance_to(pos) < 2.0:
 				clear = false
 		for c in players_root.get_children():
-			if (c as Node3D).global_position.distance_to(pos) < 12.0:
+			if (c as Node3D).global_position.distance_to(pos) < min_player_dist:
 				clear = false
 		if clear:
 			break
@@ -272,7 +287,7 @@ func request_travel(target: int) -> void:
 		return
 	var id := _sender()
 	var p := get_player(id)
-	if p == null:
+	if p == null or is_dead(id):
 		return
 	var problem := travel_problem(p, target)
 	if problem != "":
@@ -287,7 +302,7 @@ func _travel(p: Player, target: int) -> void:
 	var from_cab: Dictionary = Level.roof_cab if cab_of(p.global_position) == 0 else floor_info.cab
 	var riders: Array[Player] = []
 	for c in players_root.get_children():
-		if Floors.in_zone(from_cab, (c as Node3D).global_position):
+		if Floors.in_zone(from_cab, (c as Node3D).global_position) and not is_dead((c as Player).peer_id):
 			riders.append(c as Player)
 	var cargo: Array[Specimen] = []
 	for s in specimens():
@@ -378,10 +393,13 @@ func request_doors(closed: bool) -> void:
 	if not multiplayer.is_server():
 		return
 	var p := get_player(_sender())
-	if p == null:
+	if p == null or is_dead(p.peer_id):
 		return
 	var where := cab_of(p.global_position)
 	if where >= 0:
+		if closed and where == 1 and door_lock > 0.0:
+			notify.rpc_id(p.peer_id, "The doors are jammed for a few more seconds.")
+			return
 		set_door.rpc(where, closed)
 
 
@@ -475,7 +493,7 @@ func request_stun(spec_name: String) -> void:
 		return
 	var s := specimens_root.get_node_or_null(spec_name) as Specimen
 	var p := get_player(_sender())
-	if s == null or p == null or p.global_position.distance_to(s.global_position) > 5.0:
+	if s == null or p == null or is_dead(p.peer_id) or p.global_position.distance_to(s.global_position) > 5.0:
 		return
 	s.stun_left = float(s.spec.stun) * Shop.stun_mult(upgrades)
 	s.on_stunned(p.peer_id)
@@ -491,7 +509,7 @@ func request_grab(spec_name: String, on: bool) -> void:
 		return
 	if on:
 		var p := get_player(id)
-		if p == null or p.global_position.distance_to(s.global_position) > 5.0:
+		if p == null or is_dead(id) or bool(s.spec.get("hostile", false)) or p.global_position.distance_to(s.global_position) > 5.0:
 			return
 		for other in specimens():   # one specimen per player
 			if other != s and id in other.held_by:
@@ -543,6 +561,14 @@ func _begin_day(briefing: float) -> void:
 	time_left = DAY_SECONDS
 	earned_today = 0
 	daylight_bought = 0
+	hp.clear()
+	dead.clear()
+	deaths_today = 0
+	door_lock = 0.0
+	door_bash = 0.0
+	stalker_t = 0.0
+	lost_reason = ""
+	day_note = ""
 	for s in specimens():   # a new day: nothing left over, on the roof or below
 		s.queue_free()
 	_deactivate_floor()
@@ -564,7 +590,8 @@ func _state_dict() -> Dictionary:
 	return {"day": day, "phase": int(phase), "phase_t": phase_t, "time_left": time_left,
 		"earned": earned_today, "bank": credits, "delivered": delivered,
 		"upgrades": upgrades, "daylight": daylight_bought,
-		"floor": active_floor, "fseed": floor_seed, "doors": doors}
+		"floor": active_floor, "fseed": floor_seed, "doors": doors,
+		"hp": hp, "dead": dead, "lost": lost_reason, "note": day_note}
 
 
 @rpc("authority", "call_local", "reliable")
@@ -581,6 +608,10 @@ func set_run_state(st: Dictionary, msg: String) -> void:
 	if st.floor != active_floor or st.fseed != floor_seed:
 		_build_floor(st.floor, st.fseed)
 	doors = st.doors.duplicate()
+	hp = st.hp.duplicate()
+	dead = st.dead.duplicate()
+	lost_reason = st.lost
+	day_note = st.note
 	_apply_doors()
 	hud.run_changed(msg)
 
@@ -607,6 +638,7 @@ func tick_run(dt: float) -> void:
 				_broadcast("The clock is running. Earn $%d before it hits zero." % quota())
 		Phase.PLAYING:
 			time_left -= dt
+			_tick_danger(dt)
 			if time_left <= 0.0:
 				_end_day()
 		Phase.SUMMARY:
@@ -616,18 +648,163 @@ func tick_run(dt: float) -> void:
 				_begin_day(BRIEFING_SECONDS)
 
 
+## Midnight. Whoever is still down in the building doesn't make it. If at least one
+## person got back to the roof alive, and the quota is met, the day counts, but the
+## military docks the bank for every crew member lost.
 func _end_day() -> void:
 	time_left = 0.0
+	var back: Array[Player] = []
+	for p in alive_players():
+		if Level.floor_of(p.global_position.y) == 0:
+			back.append(p)
+	if back.is_empty():
+		_lose("Nobody made it back to the roof before midnight.")
+		return
+	for p in alive_players():
+		if not back.has(p):
+			kill_player(p.peer_id, "the night", false)
 	if earned_today < quota():
+		lost_reason = "You earned $%d of the $%d quota." % [earned_today, quota()]
 		phase = Phase.LOST
 		_broadcast("OVERRUN. You missed the day %d quota." % day)
-	elif day >= DAYS:
+		return
+	day_note = ""
+	if deaths_today > 0:
+		var cut := mini(credits, roundi(credits * minf(1.0, DEATH_CUT * deaths_today)))
+		credits -= cut
+		day_note = "%d crew lost. The military docks $%d from the bank." % [deaths_today, cut]
+	if day >= DAYS:
 		phase = Phase.WON
-		_broadcast("You made it. Every quota met.")
+		_broadcast("You made it. Every quota met. %s" % day_note)
 	else:
 		phase = Phase.SUMMARY
 		phase_t = SUMMARY_SECONDS
-		_broadcast("Day %d complete. Quota met." % day)
+		_broadcast("Day %d complete. Quota met. %s" % [day, day_note])
+
+
+func _lose(reason: String) -> void:
+	lost_reason = reason
+	time_left = 0.0
+	phase = Phase.LOST
+	_broadcast(reason)
+
+
+# --- Danger: health, death, hunters -----------------------------------------
+
+func hp_of(id: int) -> float:
+	return float(hp.get(id, MAX_HP))
+
+
+func is_dead(id: int) -> bool:
+	return bool(dead.get(id, false))
+
+
+func alive_players() -> Array[Player]:
+	var out: Array[Player] = []
+	for c in players_root.get_children():
+		var p := c as Player
+		if p and not is_dead(p.peer_id):
+			out.append(p)
+	return out
+
+
+func hunters() -> Array[Specimen]:
+	var out: Array[Specimen] = []
+	for s in specimens():
+		if bool(s.spec.get("hostile", false)):
+			out.append(s)
+	return out
+
+
+## How many hunters the floor should have by now: none in the morning, more as night
+## falls, and more on the deeper floors.
+static func stalker_target(progress: float, floor_idx: int) -> int:
+	return mini(8, int(floor(smoothstep(0.35, 1.0, progress) * (2.0 + floor_idx))))
+
+
+## Server only.
+func damage_player(id: int, amount: float, source: String) -> void:
+	if not multiplayer.is_server() or phase != Phase.PLAYING or is_dead(id) or get_player(id) == null:
+		return
+	hp[id] = maxf(0.0, hp_of(id) - amount)
+	player_hurt.rpc(id, hp[id])
+	if hp[id] <= 0.0:
+		kill_player(id, source)
+
+
+@rpc("authority", "call_local", "reliable")
+func player_hurt(id: int, value: float) -> void:
+	hp[id] = value
+	var me := local_player()
+	if me and me.peer_id == id:
+		hud.hurt()
+
+
+## Server only.
+func kill_player(id: int, source: String, check_wipe := true) -> void:
+	if is_dead(id):
+		return
+	deaths_today += 1
+	var p := get_player(id)
+	var who := p.tag.text if p else str(id)
+	player_died.rpc(id, "%s was killed by %s." % [who, source])
+	if check_wipe and alive_players().is_empty():
+		_lose("The whole crew was lost.")
+
+
+@rpc("authority", "call_local", "reliable")
+func player_died(id: int, msg: String) -> void:
+	dead[id] = true
+	hp[id] = 0.0
+	hud.toast(msg)
+	var me := local_player()
+	if me and me.peer_id == id:
+		hud.hurt()
+		if hud.shop_open:
+			close_shop()
+		if hud.elevator_open:
+			close_elevator()
+
+
+@rpc("authority", "unreliable_ordered")
+func net_health(h: Dictionary) -> void:
+	hp = h.duplicate()
+
+
+## Server only, once per tick of the running day: healing, hunters arriving, doors being forced.
+func _tick_danger(dt: float) -> void:
+	door_lock = maxf(0.0, door_lock - dt)
+	for p in alive_players():
+		var cur := hp_of(p.peer_id)
+		if cur >= MAX_HP:
+			continue
+		var rate := 0.0
+		if Level.floor_of(p.global_position.y) == 0:
+			rate = ROOF_HEAL
+		elif doors[1] and Floors.in_zone(floor_info.get("cab", {}), p.global_position):
+			rate = CAB_HEAL
+		if rate > 0.0:
+			hp[p.peer_id] = minf(MAX_HP, cur + rate * dt)
+	if active_floor >= 0 and players_on_floor() > 0:
+		stalker_t += dt
+		if stalker_t >= STALKER_INTERVAL:
+			stalker_t = 0.0
+			if hunters().size() < stalker_target(day_progress(), active_floor):
+				spawn_specimen("stalker", 18.0)
+	if active_floor >= 0 and doors[1] and floor_info.has("cab"):
+		var door_pos: Vector3 = floor_info.cab.door.global_position
+		var pounding := false
+		for h in hunters():
+			if not h.is_stunned() and h.global_position.distance_to(door_pos) < 3.5:
+				pounding = true
+		door_bash = door_bash + dt if pounding else maxf(0.0, door_bash - dt)
+		if door_bash >= DOOR_FORCE_SECONDS:
+			door_bash = 0.0
+			door_lock = DOOR_LOCK_SECONDS
+			set_door.rpc(1, false)
+			_broadcast("A Stalker tore the elevator doors open!")
+	else:
+		door_bash = 0.0
 
 
 # --- The store ---------------------------------------------------------------
@@ -659,7 +836,9 @@ func request_buy(id: String) -> void:
 	var buyer := _sender()
 	var p := get_player(buyer)
 	var problem := ""
-	if p == null or Level.floor_of(p.global_position.y) != 0:
+	if p == null or is_dead(buyer):
+		return
+	if Level.floor_of(p.global_position.y) != 0:
 		problem = "The store is on the roof."
 	else:
 		problem = buy_problem(id)
@@ -829,13 +1008,16 @@ func _physics_process(delta: float) -> void:
 	if clock_sync_t >= 0.5:
 		clock_sync_t = 0.0
 		net_clock.rpc(phase_t, time_left)
+		net_health.rpc(hp)
 	var run_over := phase == Phase.WON or phase == Phase.LOST
 	for s in specimens():
-		if Level.in_pen(s.global_position):
+		var hostile := bool(s.spec.get("hostile", false))
+		if Level.in_pen(s.global_position) and not hostile:
 			if not run_over:
 				_deliver(s)
 		elif Level.fell_out(s.global_position.y):
-			respawn_queue.append([2.0, s.species])
+			if not hostile:
+				respawn_queue.append([2.0, s.species])
 			s.queue_free()
 	for entry in respawn_queue:
 		entry[0] -= delta
@@ -1291,6 +1473,201 @@ func _selftest() -> void:
 	_check(bl.mood == 2 and bl.blink_t == 0.0, "two watchers freeze it: no warning and no blink even with players close")
 	p2.queue_free()
 	bl.queue_free()
+	await get_tree().physics_frame
+	print("Danger:")
+	var spare := get_player(999)
+	if spare:
+		spare.queue_free()
+	await get_tree().physics_frame
+	var mate := player_spawner.spawn([2]) as Player
+	new_run(0.1)
+	tick_run(0.2)
+	time_left = DAY_SECONDS
+	p.global_position = Vector3(-5, 0.05, -3)
+	mate.global_position = Vector3(-7, 0.05, -3)
+	damage_player(1, 30.0, "a test")
+	_check(is_equal_approx(hp_of(1), 70.0) and not is_dead(1), "damage lowers health (%d left)" % int(hp_of(1)))
+	tick_run(1.0)
+	_check(hp_of(1) > 77.0 and hp_of(1) <= 78.01, "the roof heals you (%.0f health after a second)" % hp_of(1))
+	p.global_position = Vector3(0, Floors.EXP_Y + 0.05, 0)
+	var hp_below := hp_of(1)
+	tick_run(1.0)
+	_check(hp_of(1) == hp_below, "down on a floor you don't heal")
+	p.global_position = Vector3(-5, 0.05, -3)
+	for i in 4:
+		damage_player(1, 40.0, "a test")
+	_check(is_dead(1) and phase == Phase.PLAYING, "enough damage kills; the crew carries on while someone lives")
+	credits = 1000
+	request_buy.rpc_id(1, "coils")
+	_check(credits == 1000 and level_of("coils") == 0, "the dead can't shop")
+	request_travel.rpc_id(1, 0)
+	_check(active_floor == -1, "the dead can't use the elevator")
+	tick_run(2.0)
+	_check(is_dead(1), "healing doesn't bring the dead back")
+	var corpse_grab := specimen_spawner.spawn(["D1", "skitter", p.get_hold_point()]) as Specimen
+	await get_tree().physics_frame
+	request_grab.rpc_id(1, "D1", true)
+	request_stun.rpc_id(1, "D1")
+	_check(corpse_grab.held_by.size() == 0 and not corpse_grab.is_stunned(), "the dead can't stun or grab")
+	corpse_grab.queue_free()
+	new_run(0.1)
+	tick_run(0.2)
+	_check(not is_dead(1) and hp_of(1) == MAX_HP, "a new day brings everyone back at full health")
+	p.global_position = Vector3(-5, 0.05, -3)
+	var bru2 := specimen_spawner.spawn(["D2", "brute", Vector3(-5, 0.7, -2)]) as Specimen
+	await get_tree().physics_frame
+	bru2.provoked_by = 1
+	bru2.charge_t = 5.0
+	bru2._plan_territorial(0.1)
+	_check(is_equal_approx(hp_of(1), MAX_HP - Specimen.BRUTE_DAMAGE), "a Brute's slam hurts (%d health)" % int(hp_of(1)))
+	bru2.queue_free()
+	hp[1] = MAX_HP
+	var boomer := specimen_spawner.spawn(["D3", "glimmer", Vector3(-5, 0.6, -1)]) as Specimen
+	await get_tree().physics_frame
+	boomer._explode()
+	_check(hp_of(1) < MAX_HP - 20.0 and hp_of(1) > MAX_HP - Specimen.BOOM_DAMAGE, "a Glimmer's explosion hurts (%d health)" % int(hp_of(1)))
+	print("Stalkers:")
+	_check(stalker_target(0.0, 0) == 0 and stalker_target(0.3, 4) == 0, "no hunters in the morning")
+	_check(stalker_target(0.6, 2) < stalker_target(1.0, 2) and stalker_target(1.0, 0) < stalker_target(1.0, 4), "more hunters as night falls and on deeper floors (%d, %d, %d)" % [
+		stalker_target(0.6, 2), stalker_target(1.0, 2), stalker_target(1.0, 4)])
+	_check(stalker_target(1.0, 99) == 8, "never more than 8")
+	new_run(0.1)
+	tick_run(0.2)
+	time_left = DAY_SECONDS
+	p.global_position = Vector3(-5, 0.05, -3)
+	mate.global_position = Vector3(-7, 0.05, -3)
+	_activate_floor(0)
+	await get_tree().physics_frame
+	for h2 in hunters():
+		h2.queue_free()
+	var maze2: Dictionary = floor_info.maze
+	var hunt_at: Vector3 = floor_info.cells[3]
+	p.global_position = Vector3(hunt_at.x, Floors.EXP_Y + 0.05, hunt_at.z)
+	var far: Vector3 = floor_info.cells[floor_info.cells.size() - 1]
+	var st := specimen_spawner.spawn(["Z1", "stalker", far]) as Specimen
+	await get_tree().physics_frame
+	var dg_plan := st._plan_hunter(0.1)
+	var want := Floors.next_step(maze2, st.global_position, p.global_position) - st.global_position
+	want.y = 0.0
+	_check(dg_plan.length() > 5.0 and dg_plan.normalized().dot(want.normalized()) > 0.99 and st.mood == 1,
+		"a Stalker follows the maze route toward the nearest player")
+	st.global_position = Vector3(hunt_at.x + 1.2, Floors.EXP_Y + 1.0, hunt_at.z)
+	dg_plan = st._plan_hunter(0.1)
+	_check(is_equal_approx(hp_of(1), MAX_HP - Specimen.STALK_DAMAGE) and dg_plan == Vector3.ZERO, "up close it hits for %d" % int(Specimen.STALK_DAMAGE))
+	st._plan_hunter(0.1)
+	_check(is_equal_approx(hp_of(1), MAX_HP - Specimen.STALK_DAMAGE), "and has to wait between hits")
+	st._plan_hunter(Specimen.STALK_COOLDOWN + 0.1)
+	_check(is_equal_approx(hp_of(1), MAX_HP - 2.0 * Specimen.STALK_DAMAGE), "then hits again")
+	request_grab.rpc_id(1, "Z1", true)
+	_check(st.held_by.size() == 0, "it can't be grabbed")
+	var bank_now := credits
+	st.global_position = Vector3(9.5, 1.0, 9.5)
+	await _wait(0.3)
+	_check(credits == bank_now and is_instance_valid(st) and not st.is_queued_for_deletion(), "and it's never sold, even if it wanders into the pen")
+	st.global_position = Vector3(hunt_at.x + 1.2, Floors.EXP_Y + 1.0, hunt_at.z)
+	st.linear_velocity = Vector3.ZERO
+	var cab_spot: Vector3 = floor_info.cab.zone_c + Vector3(0, -0.95, 0)
+	p.global_position = cab_spot
+	hp[1] = MAX_HP
+	request_doors.rpc_id(1, true)
+	_check(doors[1], "closing the doors works from inside")
+	_check(st._hunt_target() == null, "a player shut in the elevator can't be hunted")
+	var lurk := st._plan_hunter(0.1)
+	_check(lurk.x != INF and st.mood == 1, "the Stalker heads for the elevator doors and waits there")
+	tick_run(2.0)
+	_check(hp_of(1) == MAX_HP and doors[1], "inside, the doors hold for now")
+	hp[1] = 50.0
+	tick_run(1.0)
+	_check(hp_of(1) > 50.0, "and you heal slowly in there (%d)" % int(hp_of(1)))
+	st.global_position = floor_info.cab.door.global_position + Vector3(1.5, -0.3, 0)
+	st.linear_velocity = Vector3.ZERO
+	tick_run(DOOR_FORCE_SECONDS + 0.5)
+	_check(not doors[1] and door_lock > 0.0, "a Stalker pounding on the doors for %d seconds forces them open" % int(DOOR_FORCE_SECONDS))
+	request_doors.rpc_id(1, true)
+	_check(not doors[1], "and they're jammed for a few seconds, so you can't just re-close them")
+	st.queue_free()
+	for h2 in hunters():
+		h2.queue_free()
+	await get_tree().physics_frame
+	stalker_t = STALKER_INTERVAL
+	time_left = 60.0
+	p.global_position = Vector3(hunt_at.x, Floors.EXP_Y + 0.05, hunt_at.z)
+	tick_run(0.1)
+	_check(hunters().size() >= 1, "late in the day a hunter turns up on the floor (%d)" % hunters().size())
+	print("Midnight:")
+	for h2 in specimens():
+		h2.queue_free()
+	_deactivate_floor()
+	var roof_a := Vector3(-5, 0.05, -3)
+	var roof_b := Vector3(-7, 0.05, -3)
+	var down := Vector3(0, Floors.EXP_Y + 0.05, 0)
+	new_run(0.1)
+	tick_run(0.2)
+	earned_today = quota()
+	credits = 1000
+	p.global_position = roof_a
+	mate.global_position = roof_b
+	time_left = 0.1
+	tick_run(0.2)
+	_check(phase == Phase.SUMMARY and credits == 1000 and day_note == "", "everyone back alive: the day counts and the bank is untouched")
+	new_run(0.1)
+	tick_run(0.2)
+	earned_today = quota()
+	credits = 1000
+	p.global_position = roof_a
+	mate.global_position = roof_b
+	kill_player(2, "a test")
+	time_left = 0.1
+	tick_run(0.2)
+	_check(phase == Phase.SUMMARY and credits == 800 and day_note.begins_with("1 crew lost"),
+		"one death, one survivor back: the day counts, bank cut 20%% ($1000 -> $%d)" % credits)
+	tick_run(SUMMARY_SECONDS + 0.1)
+	_check(day == 2 and not is_dead(2) and hp_of(2) == MAX_HP and day_note == "", "next day the dead return")
+	new_run(0.1)
+	tick_run(0.2)
+	earned_today = quota()
+	credits = 1000
+	p.global_position = roof_a
+	mate.global_position = down
+	time_left = 0.1
+	tick_run(0.2)
+	_check(is_dead(2) and phase == Phase.SUMMARY and credits == 800, "someone still down in the building at midnight doesn't make it")
+	new_run(0.1)
+	tick_run(0.2)
+	earned_today = quota()
+	credits = 1000
+	p.global_position = down
+	mate.global_position = down
+	time_left = 0.1
+	tick_run(0.2)
+	_check(phase == Phase.LOST and lost_reason.begins_with("Nobody"), "if nobody made it back, the run is lost even with the quota met")
+	new_run(0.1)
+	tick_run(0.2)
+	earned_today = quota() - 1
+	p.global_position = roof_a
+	mate.global_position = roof_b
+	time_left = 0.1
+	tick_run(0.2)
+	_check(phase == Phase.LOST and lost_reason.begins_with("You earned"), "back alive but short of the quota: still lost")
+	new_run(0.1)
+	tick_run(0.2)
+	kill_player(1, "a test")
+	_check(phase == Phase.PLAYING, "one death doesn't end the run")
+	kill_player(2, "a test")
+	_check(phase == Phase.LOST and lost_reason.begins_with("The whole crew"), "the whole crew dying ends it at once")
+	new_run(0.1)
+	tick_run(0.2)
+	day = DAYS
+	earned_today = quota()
+	credits = 2000
+	p.global_position = roof_a
+	mate.global_position = roof_b
+	kill_player(2, "a test")
+	time_left = 0.1
+	tick_run(0.2)
+	_check(phase == Phase.WON and credits == 1600, "winning on the last day still costs the bank for a death ($2000 -> $%d)" % credits)
+	mate.queue_free()
+	new_run(0.1)
 	await get_tree().physics_frame
 	print("Day clock:")
 	_check(clock_text(0.0) == "6:00 AM" and clock_text(0.5) == "3:00 PM" and clock_text(1.0) == "12:00 AM",

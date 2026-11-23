@@ -139,6 +139,12 @@ Clients send requests and the host validates them (for example, it checks that y
 - `--autotest-host` + `--autotest-join`: two real processes over the network. The client stuns and grabs, the host sees it,
   the delivery happens, and the client's ledger updates.
 
+## Danger (build 11)
+
+- Health 100. Brute slams do 20, a Glimmer explosion up to 35, a Stalker hit 25 (4 hits kills). You heal 8/s on the roof and 4/s shut inside an elevator.
+- Stalkers are hunters (no value, can't be captured, only stunned). None in the morning; more as the night goes on and the deeper the floor. They path through the maze to you, and ignore anyone behind closed elevator doors, but pounding on the doors for 6 s tears them open and jams them for 5 s.
+- Midnight: anyone still on a floor is lost. If at least one person is back on the roof and the quota is met, the day counts, and the military docks 20% of the bank per crew member lost. Nobody back, or the whole crew dead, ends the run. Dead players return the next day.
+
 ## Not in yet (next steps, in order)
 
 1. Steam lobbies and invites (GodotSteam) instead of IP + port.
