@@ -18,6 +18,8 @@ var zap_t := 0.0
 var target_lbl: Label
 var bottom_lbl: Label
 var flash_rect: ColorRect
+var dim_rect: ColorRect
+var banner_lbl: Label
 
 
 func _ready() -> void:
@@ -33,6 +35,15 @@ func _ready() -> void:
 	game_ui.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	game_ui.visible = false
 	add_child(game_ui)
+	dim_rect = ColorRect.new()   # darkens the world on the win / lose screens
+	dim_rect.set_anchors_preset(Control.PRESET_FULL_RECT)
+	dim_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	dim_rect.color = Color(0, 0, 0, 0.0)
+	game_ui.add_child(dim_rect)
+	banner_lbl = _label(40, true)
+	banner_lbl.anchor_top = 0.0
+	banner_lbl.offset_top = 150
+	banner_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	top_lbl = _label(22)
 	top_lbl.position = Vector2(16, 12)
 	toast_lbl = _label(26, true)
@@ -97,7 +108,7 @@ func _build_menu() -> Control:
 	title.add_theme_font_size_override("font_size", 48)
 	v.add_child(title)
 	var sub := Label.new()
-	sub.text = "Prototype 1: capture & haul  ·  build 4"
+	sub.text = "Prototype 1: capture & haul  ·  build 5"
 	v.add_child(sub)
 	var desc := Label.new()
 	desc.autowrap_mode = TextServer.AUTOWRAP_WORD
@@ -162,10 +173,42 @@ func zap() -> void:
 	zap_t = 0.15
 
 
-func ledger(credits: int, delivered: int, quota: int, msg: String) -> void:
-	var met := "   QUOTA MET" if credits >= quota else ""
-	top_lbl.text = "Credits: $%d / $%d quota%s\nSpecimens delivered: %d" % [credits, quota, met, delivered]
+## Called whenever the server sends a new run state. The numbers themselves are drawn every frame.
+func run_changed(msg: String) -> void:
 	toast(msg)
+
+
+func _top_text() -> String:
+	var g := game
+	var clock := ""
+	match g.phase:
+		Game.Phase.BRIEFING: clock = "starts in %d" % ceili(g.phase_t)
+		Game.Phase.PLAYING: clock = Game.fmt_clock(g.time_left)
+		Game.Phase.SUMMARY: clock = "day over"
+		_: clock = "run over"
+	var met := "   QUOTA MET" if g.earned_today >= g.quota() else ""
+	return "DAY %d / %d   ·   %s\nQuota today: $%d / $%d%s\nBank: $%d   ·   Delivered: %d" % [
+		g.day, Game.DAYS, clock, g.earned_today, g.quota(), met, g.credits, g.delivered]
+
+
+func _banner_text() -> String:
+	var g := game
+	var host_hint := "Host: press R for a new run" if g.multiplayer.is_server() else "Waiting for the host to start a new run"
+	match g.phase:
+		Game.Phase.BRIEFING:
+			if g.phase_t > Game.BRIEFING_SECONDS:
+				return ""   # day 1's long wait is for the opening cinematic: keep the view clear
+			return "DAY %d  ·  QUOTA $%d\nThe clock starts in %d" % [g.day, g.quota(), ceili(g.phase_t)]
+		Game.Phase.SUMMARY:
+			return "DAY %d COMPLETE\nEarned $%d  (quota $%d)\nBank: $%d  ·  Day %d starts in %d" % [
+				g.day, g.earned_today, g.quota(), g.credits, g.day + 1, ceili(g.phase_t)]
+		Game.Phase.WON:
+			return "YOU MADE IT\nAll %d quotas met. %d specimens delivered.\nBank: $%d\n%s" % [
+				Game.DAYS, g.delivered, g.credits, host_hint]
+		Game.Phase.LOST:
+			return "OVERRUN  ·  DAY %d\nYou earned $%d of the $%d quota.\n%d specimens delivered.\n%s" % [
+				g.day, g.earned_today, g.quota(), g.delivered, host_hint]
+	return ""
 
 
 func _process(delta: float) -> void:
@@ -176,6 +219,13 @@ func _process(delta: float) -> void:
 	cross_lbl.modulate = Color(0.5, 0.8, 1.0) if zap_t > 0.0 else Color.WHITE
 	if not game_ui.visible or game == null:
 		return
+	top_lbl.text = _top_text()
+	var low_clock: bool = game.phase == Game.Phase.PLAYING and game.time_left < 30.0
+	top_lbl.modulate = Color(1.0, 0.55, 0.5) if low_clock else Color.WHITE
+	banner_lbl.text = _banner_text()
+	var run_over: bool = game.phase == Game.Phase.WON or game.phase == Game.Phase.LOST
+	dim_rect.color.a = 0.5 if run_over else 0.0
+	cross_lbl.visible = not run_over
 	var p := game.local_player()
 	if p == null:
 		return

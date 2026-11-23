@@ -22,6 +22,24 @@ Everything is gray boxes on purpose. Don't add art until that answer is yes.
 | Left click | Stun prod (6 charges, they recharge on the roof) |
 | Hold E | Grab and carry |
 | Esc | Free the mouse (click to recapture) |
+| R | Host only: start a new run after winning or losing |
+
+## The run
+
+A run is **4 days**. Each day has a **5-minute clock** and a **quota** you must earn before it hits zero.
+
+| Day | 1 | 2 | 3 | 4 |
+|---|---|---|---|---|
+| Quota | $300 | $500 | $750 | $1,000 |
+
+- **Earned today** counts toward the quota and resets every day. The **bank** keeps everything you've ever earned (it's what the store will spend).
+  Earn more than the quota and the surplus stays in the bank.
+- Miss the quota by even $1 when the clock hits zero and the run ends: **OVERRUN**.
+- Make it and you get a **day summary** (12 seconds), then the next day starts: the building is restocked and the crew is back on the roof with full prods.
+- Make the day 4 quota and you **win**. The host presses **R** to start a fresh run.
+- The host's computer owns the clock; everyone else counts down locally and is corrected twice a second.
+- Day 1 starts with a 16-second wait so the opening cinematic can play. Later days start after 6 seconds.
+- All the numbers (`QUOTAS`, `DAY_SECONDS`, and so on) are at the top of `scripts/game.gd`. They're a first guess. Tune them after playtests.
 
 ## The rules being tested
 
@@ -76,9 +94,9 @@ Clients send requests and the host validates them (for example, it checks that y
 
 ## Not in yet (next steps, in order)
 
-1. **Playtest with a friend** and tune the struggle and stun numbers until carrying is funny and tense.
+1. **The military store:** spend the bank on upgrades.
 2. Steam lobbies and invites (GodotSteam) instead of IP + port.
 3. Proximity voice chat.
-4. A day timer, the quota deadline, and the contract/price board.
+4. Random floor layouts, so runs don't repeat.
 5. The infestation climbing the floors, and the rooftop last stand.
-6. Real art, only after 1 feels good.
+6. Real art, only after the rest feels good.

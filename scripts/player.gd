@@ -101,6 +101,15 @@ func _ready() -> void:
 	tag.visible = not mine
 
 
+## A new day: back to camp with a full prod and empty hands.
+func reset_for_day() -> void:
+	global_position = game.roof_spawn(peer_id)
+	velocity = Vector3.ZERO
+	charges = MAX_CHARGES
+	prod_cd = 0.0
+	grabbing = ""
+
+
 func get_hold_point() -> Vector3:
 	return head.global_position - head.global_basis.z * 2.0
 

@@ -8,10 +8,19 @@ extends Node3D
 
 const PORT := 7777
 const MAX_PLAYERS := 4
-const QUOTA := 600
 const POPULATION := {"skitter": 4, "brute": 2, "glimmer": 1}
 const RESPAWN_DELAY := 20.0
 const DEPTH_NAMES := ["ROOF (camp)", "DEPTH 1: Skitters", "DEPTH 2: Brutes", "DEPTH 3: Glimmers"]
+
+# The run: DAYS days. Each day you must earn that day's quota before the clock runs out.
+# Surplus earnings stay in the bank (to be spent in the store); the quota resets every day.
+const DAYS := 4
+const QUOTAS := [300, 500, 750, 1000]
+const DAY_SECONDS := 300.0
+const BRIEFING_SECONDS := 6.0
+const FIRST_BRIEFING_SECONDS := 16.0   # day 1 waits for the opening cinematic
+const SUMMARY_SECONDS := 12.0
+enum Phase { BRIEFING, PLAYING, SUMMARY, WON, LOST }
 
 var players_root: Node3D
 var specimens_root: Node3D
@@ -19,8 +28,14 @@ var player_spawner: MultiplayerSpawner
 var specimen_spawner: MultiplayerSpawner
 var hud: Hud
 var in_game := false
-var credits := 0
+var credits := 0          # the bank: spendable
+var earned_today := 0     # counts toward today's quota
 var delivered := 0
+var day := 1
+var phase := Phase.BRIEFING
+var phase_t := 0.0        # seconds left in a BRIEFING or SUMMARY
+var time_left := 0.0      # seconds left on the day's clock
+var clock_sync_t := 0.0
 var next_spec_id := 0
 var respawn_queue: Array = []   # [[seconds_left, species], ...] (server only)
 var test_mode := ""
@@ -49,9 +64,9 @@ func _ready() -> void:
 	multiplayer.connected_to_server.connect(_start_game)
 	multiplayer.connection_failed.connect(_on_connection_failed)
 	multiplayer.server_disconnected.connect(_on_server_disconnected)
-	hud.ledger(0, 0, QUOTA, "")
+	hud.run_changed("")
 	var args := OS.get_cmdline_user_args()
-	for a in ["--autotest-host", "--autotest-join", "--selftest", "--shot"]:
+	for a in ["--autotest-host", "--autotest-join", "--selftest", "--shot", "--shot-hud"]:
 		if a in args:
 			test_mode = a
 	match test_mode:
@@ -59,6 +74,7 @@ func _ready() -> void:
 		"--autotest-join": _autotest_join()
 		"--selftest": _selftest()
 		"--shot": _shot()
+		"--shot-hud": _shot_hud()
 
 
 func _make_spawner(n: String, path: String, fn: Callable) -> MultiplayerSpawner:
@@ -72,7 +88,7 @@ func _make_spawner(n: String, path: String, fn: Callable) -> MultiplayerSpawner:
 
 func _setup_input() -> void:
 	var keys := {"fwd": KEY_W, "back": KEY_S, "left": KEY_A, "right": KEY_D,
-		"jump": KEY_SPACE, "sprint": KEY_SHIFT, "grab": KEY_E, "menu": KEY_ESCAPE}
+		"jump": KEY_SPACE, "sprint": KEY_SHIFT, "grab": KEY_E, "menu": KEY_ESCAPE, "restart": KEY_R}
 	for action in keys:
 		if not InputMap.has_action(action):
 			InputMap.add_action(action)
@@ -97,10 +113,7 @@ func host() -> void:
 	multiplayer.multiplayer_peer = peer
 	_start_game()
 	player_spawner.spawn([1])
-	for sp in POPULATION:
-		for i in POPULATION[sp]:
-			spawn_specimen(sp)
-	_broadcast("Shift started. The military wants live specimens.")
+	new_run(FIRST_BRIEFING_SECONDS)
 
 
 func join(ip: String) -> void:
@@ -136,7 +149,7 @@ func capture_mouse() -> void:
 func _on_peer_connected(id: int) -> void:
 	if multiplayer.is_server():
 		player_spawner.spawn([id])
-		set_ledger.rpc_id(id, credits, delivered, "You joined the crew.")
+		set_run_state.rpc_id(id, _state_dict(), "You joined the crew.")
 
 
 func _on_peer_disconnected(id: int) -> void:
@@ -162,8 +175,12 @@ func _spawn_player_node(data: Variant) -> Node:
 	var id: int = data[0]
 	var p := Player.new()
 	p.setup(id, self)
-	p.position = Vector3(16.5 - (id % 4) * 1.3, 0.2, -16.6)   # at the NE railing, facing the crater
+	p.position = roof_spawn(id)
 	return p
+
+
+func roof_spawn(id: int) -> Vector3:
+	return Vector3(16.5 - (id % 4) * 1.3, 0.2, -16.6)   # at the NE railing, facing the crater
 
 
 func _spawn_specimen_node(data: Variant) -> Node:
@@ -287,25 +304,154 @@ func _remove_holder(s: Specimen, id: int) -> void:
 	s.held_by = h
 
 
+# --- The run: days, quotas, win and lose -------------------------------------
+
+static func quota_for(d: int) -> int:
+	return QUOTAS[clampi(d - 1, 0, QUOTAS.size() - 1)]
+
+
+func quota() -> int:
+	return quota_for(day)
+
+
+static func fmt_clock(sec: float) -> String:
+	var t := maxi(0, ceili(sec))
+	return "%d:%02d" % [t / 60, t % 60]
+
+
+## Server only. Starts a brand-new run (day 1, empty bank).
+func new_run(briefing := BRIEFING_SECONDS) -> void:
+	day = 1
+	credits = 0
+	delivered = 0
+	_begin_day(briefing)
+
+
+## Server only. Resets the building for a new day: fresh specimens, crew back on the roof.
+func _begin_day(briefing: float) -> void:
+	phase = Phase.BRIEFING
+	phase_t = briefing
+	time_left = DAY_SECONDS
+	earned_today = 0
+	for s in specimens():
+		s.queue_free()
+	respawn_queue.clear()
+	for sp in POPULATION:
+		for i in POPULATION[sp]:
+			spawn_specimen(sp)
+	reset_players.rpc()
+	_broadcast("Day %d of %d. Quota: $%d." % [day, DAYS, quota()])
+
+
+## Runs on every peer: each one moves its own player back to camp.
 @rpc("authority", "call_local", "reliable")
-func set_ledger(c: int, d: int, msg: String) -> void:
-	credits = c
-	delivered = d
-	hud.ledger(c, d, QUOTA, msg)
+func reset_players() -> void:
+	var p := local_player()
+	if p:
+		p.reset_for_day()
+
+
+func _state_dict() -> Dictionary:
+	return {"day": day, "phase": int(phase), "phase_t": phase_t, "time_left": time_left,
+		"earned": earned_today, "bank": credits, "delivered": delivered}
+
+
+@rpc("authority", "call_local", "reliable")
+func set_run_state(st: Dictionary, msg: String) -> void:
+	day = st.day
+	phase = st.phase
+	phase_t = st.phase_t
+	time_left = st.time_left
+	earned_today = st.earned
+	credits = st.bank
+	delivered = st.delivered
+	hud.run_changed(msg)
+
+
+## Small, frequent clock corrections. Clients count down on their own in between.
+@rpc("authority", "unreliable_ordered")
+func net_clock(pt: float, tl: float) -> void:
+	phase_t = pt
+	time_left = tl
 
 
 func _broadcast(msg: String) -> void:
-	set_ledger.rpc(credits, delivered, msg)
+	set_run_state.rpc(_state_dict(), msg)
 
 
-# --- Server loop: deliveries and respawns ------------------------------------
+## Server only: advances the phases. Split out so tests can fast-forward it.
+func tick_run(dt: float) -> void:
+	match phase:
+		Phase.BRIEFING:
+			phase_t -= dt
+			if phase_t <= 0.0:
+				phase = Phase.PLAYING
+				phase_t = 0.0
+				_broadcast("The clock is running. Earn $%d before it hits zero." % quota())
+		Phase.PLAYING:
+			time_left -= dt
+			if time_left <= 0.0:
+				_end_day()
+		Phase.SUMMARY:
+			phase_t -= dt
+			if phase_t <= 0.0:
+				day += 1
+				_begin_day(BRIEFING_SECONDS)
+
+
+func _end_day() -> void:
+	time_left = 0.0
+	if earned_today < quota():
+		phase = Phase.LOST
+		_broadcast("OVERRUN. You missed the day %d quota." % day)
+	elif day >= DAYS:
+		phase = Phase.WON
+		_broadcast("You made it. Every quota met.")
+	else:
+		phase = Phase.SUMMARY
+		phase_t = SUMMARY_SECONDS
+		_broadcast("Day %d complete. Quota met." % day)
+
+
+@rpc("any_peer", "call_local", "reliable")
+func request_restart() -> void:
+	if not multiplayer.is_server() or _sender() != 1:
+		return   # only the host restarts
+	if phase != Phase.WON and phase != Phase.LOST:
+		return
+	new_run()
+
+
+func _unhandled_input(event: InputEvent) -> void:
+	if in_game and event.is_action_pressed("restart") and (phase == Phase.WON or phase == Phase.LOST):
+		request_restart.rpc_id(1)
+
+
+# --- Server loop: clock, deliveries and respawns -----------------------------
+
+func _process(delta: float) -> void:
+	if multiplayer.multiplayer_peer == null or multiplayer.is_server():
+		return
+	# Clients keep their own copy of the clock ticking between the server's corrections.
+	if phase == Phase.PLAYING:
+		time_left = maxf(0.0, time_left - delta)
+	elif phase == Phase.BRIEFING or phase == Phase.SUMMARY:
+		phase_t = maxf(0.0, phase_t - delta)
+
 
 func _physics_process(delta: float) -> void:
 	if multiplayer.multiplayer_peer == null or not multiplayer.is_server():
 		return
+	tick_run(delta)
+	clock_sync_t += delta
+	if clock_sync_t >= 0.5:
+		clock_sync_t = 0.0
+		net_clock.rpc(phase_t, time_left)
+	var run_over := phase == Phase.WON or phase == Phase.LOST
 	for s in specimens():
 		if Level.in_pen(s.global_position):
-			_deliver(s)
+			if not run_over:
+				_deliver(s)
 		elif s.global_position.y < Level.level_y(Level.DEEPEST) - 10.0:
 			respawn_queue.append([2.0, s.species])
 			s.queue_free()
@@ -318,11 +464,12 @@ func _physics_process(delta: float) -> void:
 func _deliver(s: Specimen) -> void:
 	var value: int = s.spec.value
 	credits += value
+	earned_today += value
 	delivered += 1
 	respawn_queue.append([RESPAWN_DELAY, s.species])
 	s.queue_free()
 	var msg := "%s delivered to the military: +$%d" % [s.spec.label, value]
-	if credits >= QUOTA and credits - value < QUOTA:
+	if earned_today >= quota() and earned_today - value < quota():
 		msg += ". QUOTA MET!"
 	_broadcast(msg)
 
@@ -405,6 +552,12 @@ func _autotest_join() -> void:
 	while credits <= 0:
 		await get_tree().process_frame
 	print("[join] ledger synced: credits = %d, delivered = %d" % [credits, delivered])
+	if day != 1 or quota() != QUOTAS[0] or earned_today != credits or phase_t > FIRST_BRIEFING_SECONDS:
+		print("AUTOTEST JOIN: FAIL (run state did not sync: day %d, quota $%d, earned %d, bank %d)" % [
+			day, quota(), earned_today, credits])
+		get_tree().quit(1)
+		return
+	print("[join] run state synced: day %d of %d, quota $%d, earned today $%d" % [day, DAYS, quota(), earned_today])
 	print("AUTOTEST JOIN: PASS")
 	get_tree().quit(0)
 
@@ -470,6 +623,57 @@ func _selftest() -> void:
 	_check(credits == 40 and delivered == 1, "pen turns it into $40 in the ledger (credits=%d)" % credits)
 	_check(not is_instance_valid(s) or s.is_queued_for_deletion(), "the physics object is gone after delivery")
 	_check(respawn_queue.size() == 1, "a replacement skitter is queued")
+	print("Run structure:")
+	var total := 0
+	for sp in POPULATION:
+		total += POPULATION[sp]
+	_check(earned_today == 40, "a delivery also counts toward today's quota (earned_today=%d)" % earned_today)
+	var qs := [quota_for(1), quota_for(2), quota_for(3), quota_for(4)]
+	_check(qs == QUOTAS and qs[0] < qs[1] and qs[1] < qs[2] and qs[2] < qs[3], "quotas rise every day %s" % str(qs))
+	new_run(0.1)
+	_check(day == 1 and phase == Phase.BRIEFING and credits == 0 and earned_today == 0 and delivered == 0,
+		"a new run starts at day 1 with an empty bank")
+	_check(specimens().size() == total, "the building is fully stocked (%d specimens)" % specimens().size())
+	tick_run(0.2)
+	_check(phase == Phase.PLAYING and time_left == DAY_SECONDS, "after the briefing the clock starts at %s" % fmt_clock(DAY_SECONDS))
+	tick_run(10.0)
+	_check(is_equal_approx(time_left, DAY_SECONDS - 10.0), "the clock counts down")
+	earned_today = quota() - 1
+	time_left = 0.1
+	tick_run(0.2)
+	_check(phase == Phase.LOST, "one dollar short of the quota at the buzzer: overrun")
+	specimen_spawner.spawn(["T2", "skitter", Vector3(9.5, 1.0, 9.5)])
+	var bank_before := credits
+	await _wait(0.3)
+	var t2 := specimens_root.get_node_or_null("T2")
+	_check(credits == bank_before and t2 != null and not t2.is_queued_for_deletion(), "no payouts once the run is over")
+	request_restart.rpc_id(1)
+	await get_tree().physics_frame
+	_check(day == 1 and phase == Phase.BRIEFING and credits == 0 and specimens().size() == total,
+		"the host can restart a finished run")
+	phase = Phase.PLAYING
+	earned_today = quota()
+	credits = 340
+	time_left = 0.1
+	tick_run(0.2)
+	_check(phase == Phase.SUMMARY and day == 1, "quota met: the day ends with a summary")
+	p.global_position = Vector3(0, Level.level_y(2) + 0.05, 0)   # the crew is still down in the building
+	p.charges = 0
+	tick_run(SUMMARY_SECONDS + 0.1)
+	_check(day == 2 and phase == Phase.BRIEFING and earned_today == 0 and quota() == QUOTAS[1],
+		"day 2 starts fresh with a bigger quota ($%d)" % quota())
+	_check(credits == 340, "the bank carries over between days")
+	_check(specimens().size() == total, "the building is restocked for the new day")
+	_check(Level.floor_of(p.global_position.y) == 0 and p.charges == Player.MAX_CHARGES,
+		"the crew is back on the roof with full prods")
+	day = DAYS
+	phase = Phase.PLAYING
+	earned_today = quota()
+	time_left = 0.1
+	tick_run(0.2)
+	_check(phase == Phase.WON, "meeting the final quota wins the run")
+	net_clock(5.0, 77.0)
+	_check(phase_t == 5.0 and time_left == 77.0, "clock corrections from the host are applied")
 	print("Intro cinematic:")
 	var intro := play_intro()
 	var crater := get_tree().get_nodes_in_group("crater")
@@ -500,6 +704,34 @@ func _selftest() -> void:
 	_check(intro.is_queued_for_deletion() and p.cam.h_offset == 0.0, "intro cleans up and stops the screen shake")
 	print("SELFTEST: %s" % ("PASS" if test_failures == 0 else "%d FAILED" % test_failures))
 	get_tree().quit(0 if test_failures == 0 else 1)
+
+
+## Screenshots of the HUD in each phase of a run (for checking the layout).
+func _shot_hud() -> void:
+	host()
+	var dir := OS.get_environment("SHOT_DIR")
+	var p := local_player()
+	p.global_position = Vector3(-2, 0.05, 2)
+	p.rotation.y = atan2(-95.0, 70.0)
+	p.head.rotation.x = -0.05
+	var states := [
+		["hud0", Phase.BRIEFING, {"day": 2, "earned": 0, "credits": 340, "phase_t": 5.0, "time_left": 300.0}],
+		["hud1", Phase.PLAYING, {"day": 2, "earned": 210, "credits": 550, "phase_t": 0.0, "time_left": 142.0}],
+		["hud2", Phase.PLAYING, {"day": 2, "earned": 380, "credits": 720, "phase_t": 0.0, "time_left": 18.0}],
+		["hud3", Phase.SUMMARY, {"day": 2, "earned": 540, "credits": 880, "phase_t": 9.0, "time_left": 0.0}],
+		["hud4", Phase.LOST, {"day": 3, "earned": 610, "credits": 910, "phase_t": 0.0, "time_left": 0.0}],
+		["hud5", Phase.WON, {"day": 4, "earned": 1040, "credits": 1500, "phase_t": 0.0, "time_left": 0.0}],
+	]
+	for st in states:
+		phase = st[1]
+		day = st[2].day
+		earned_today = st[2].earned
+		credits = st[2].credits
+		phase_t = st[2].phase_t
+		time_left = st[2].time_left
+		await _wait(0.5)
+		get_viewport().get_texture().get_image().save_png("%s/%s.png" % [dir, st[0]])
+	get_tree().quit(0)
 
 
 func _shot() -> void:
