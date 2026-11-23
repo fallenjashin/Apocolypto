@@ -38,10 +38,17 @@ All the numbers are at the top of `scripts/specimen.gd`, `scripts/player.gd` and
 
 ## Opening cinematic
 
-When you load in, your view turns toward the city and an asteroid crashes into it: streak, white-out flash,
-boom, screen shake, debris, then the crater's green light column. It takes about 6 seconds, it's local to each player,
-and you can move during it. The sounds are generated in code, so there are no audio files yet.
-Timing is at the top of `scripts/intro.gd`.
+You load in at the northeast railing of the roof, facing the city. An asteroid streaks down and hits: white-out flash,
+boom, screen shake, debris, and the crater's green light column. A giant rises out of the crater and roars,
+then a pack of aliens pours out, runs across the streets and climbs into the floors of your building.
+It takes about 16 seconds, plays locally for each player, and you can move the whole time.
+The sounds are generated in code (no audio files yet). Timing is at the top of `scripts/intro.gd`.
+
+## The roof and the city
+
+- The roof deck is 36 x 36 m (the building below is 30 x 30), with a see-through railing.
+  **Small specimens can slip under the railing,** so don't drop your catch off the roof.
+- The city sits on a street grid: sidewalks, road lines, wrecked and burning cars, and a scorched, rubble-strewn impact site.
 
 ## Files
 

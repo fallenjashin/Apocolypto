@@ -4,14 +4,17 @@ set -u
 G="${1:-godot}"
 cd "$(dirname "$0")/.."
 "$G" --headless --path . --import >/dev/null 2>&1
+if "$G" --headless --path . --check-only -s scripts/game.gd 2>&1 | grep -q "Parse Error"; then
+  "$G" --headless --path . --check-only -s scripts/game.gd 2>&1 | grep -A2 "Parse Error"; echo "SOME TESTS FAILED (script error)"; exit 1
+fi
 echo "== selftest =="
-"$G" --headless --path . -- --selftest 2>&1 | grep -E "PASS|FAIL|SELFTEST|^[A-Z]"
+timeout 90 "$G" --headless --path . -- --selftest 2>&1 | grep -E "PASS|FAIL|SELFTEST|^[A-Z]"
 s=${PIPESTATUS[0]}
 echo "== network test (host + client processes) =="
-"$G" --headless --path . -- --autotest-host > /tmp/rooftop_host.log 2>&1 &
+timeout 90 "$G" --headless --path . -- --autotest-host > /tmp/rooftop_host.log 2>&1 &
 hp=$!
 sleep 2
-"$G" --headless --path . -- --autotest-join 2>&1 | grep -E "^\[join\]|AUTOTEST|FAIL"
+timeout 90 "$G" --headless --path . -- --autotest-join 2>&1 | grep -E "^\[join\]|AUTOTEST|FAIL"
 j=${PIPESTATUS[0]}
 wait $hp; h=$?
 grep -E "^\[host\]|AUTOTEST|FAIL" /tmp/rooftop_host.log

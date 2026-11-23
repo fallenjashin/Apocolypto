@@ -97,7 +97,7 @@ func _build_menu() -> Control:
 	title.add_theme_font_size_override("font_size", 48)
 	v.add_child(title)
 	var sub := Label.new()
-	sub.text = "Prototype 1: capture & haul  ·  build 3"
+	sub.text = "Prototype 1: capture & haul  ·  build 4"
 	v.add_child(sub)
 	var desc := Label.new()
 	desc.autowrap_mode = TextServer.AUTOWRAP_WORD

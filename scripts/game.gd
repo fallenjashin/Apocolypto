@@ -162,7 +162,7 @@ func _spawn_player_node(data: Variant) -> Node:
 	var id: int = data[0]
 	var p := Player.new()
 	p.setup(id, self)
-	p.position = Vector3(-6.0 + (id % 4) * 1.5, 0.2, -3.0)
+	p.position = Vector3(16.5 - (id % 4) * 1.3, 0.2, -16.6)   # at the NE railing, facing the crater
 	return p
 
 
@@ -457,6 +457,11 @@ func _selftest() -> void:
 	s.held_by = PackedInt32Array([1, 999])
 	await _wait(3.0)
 	_check(1 in s.held_by and 999 in s.held_by, "awake, two players can hold it")
+	print("Roof:")
+	var q := PhysicsRayQueryParameters3D.create(Vector3(Level.ROOF_HALF - 1.0, 5, 0), Vector3(Level.ROOF_HALF - 1.0, -5, 0))
+	var hit := get_world_3d().direct_space_state.intersect_ray(q)
+	_check(not hit.is_empty() and absf(hit.position.y) < 0.1,
+		"the roof deck extends to %.0f m (was %.0f): you can stand at its new edge" % [Level.ROOF_HALF * 2, Level.HALF * 2])
 	print("Ledger:")
 	s.held_by = PackedInt32Array()
 	s.stun_left = 5.0
@@ -468,7 +473,7 @@ func _selftest() -> void:
 	print("Intro cinematic:")
 	var intro := play_intro()
 	var crater := get_tree().get_nodes_in_group("crater")
-	_check(crater.size() == 4 and crater.all(func(n): return not n.visible), "crater is hidden before the impact")
+	_check(crater.size() > 4 and crater.all(func(n): return not n.visible), "crater and rubble are hidden before the impact")
 	intro.advance(Intro.IMPACT - 0.1)
 	_check(not intro.impacted and intro.asteroid.global_position.y > Level.CRATER_POS.y,
 		"asteroid is still falling just before impact")
@@ -476,7 +481,22 @@ func _selftest() -> void:
 	_check(intro.impacted and crater.all(func(n): return n.visible) and not intro.asteroid.visible,
 		"on impact the asteroid vanishes and the crater appears")
 	_check(hud.flash_rect.color.a > 0.5, "the screen flashes on impact")
+	intro.advance(Intro.SWARM_START + 1.0)
+	_check(intro.mother.visible and intro.mother.global_position.y > Level.GROUND_Y,
+		"the giant has risen out of the crater")
+	_check(intro.swarm.any(func(c): return c.node.visible), "the pack is pouring out of the crater")
+	var climbing := false
+	for step in 40:
+		intro.advance(0.25)
+		for c in intro.swarm:
+			var n: Node3D = c.node
+			if n.visible and n.global_position.y > Level.GROUND_Y + 4.0 and \
+					(absf(n.global_position.x) > Level.HALF or absf(n.global_position.z) > Level.HALF):
+				climbing = true
+	_check(climbing, "aliens reach our building and climb its walls")
 	intro.advance(Intro.END)
+	_check(intro.swarm.all(func(c): return not c.node.visible) or intro.is_queued_for_deletion(),
+		"every alien has gone inside by the end")
 	_check(intro.is_queued_for_deletion() and p.cam.h_offset == 0.0, "intro cleans up and stops the screen shake")
 	print("SELFTEST: %s" % ("PASS" if test_failures == 0 else "%d FAILED" % test_failures))
 	get_tree().quit(0 if test_failures == 0 else 1)
@@ -494,10 +514,13 @@ func _shot() -> void:
 	]
 	var p := local_player()
 	var i := 0
-	for wait in [2.8, 1.25, 0.3, 1.0]:   # mid-fall, the impact flash, then once the intro settles
+	for wait in [2.8, 1.25, 0.3, 1.0, 2.0, 2.5, 3.0, 2.0]:   # mid-fall, the impact flash, then once the intro settles
 		await _wait(wait)
 		get_viewport().get_texture().get_image().save_png("%s/intro%d.png" % [dir, i])
 		i += 1
+	await _wait(0.4)
+	get_viewport().get_texture().get_image().save_png("%s/intro%d.png" % [dir, i])
+	await _wait(6.0)
 	i = 0
 	for v in views:
 		p.global_position = v[0]
